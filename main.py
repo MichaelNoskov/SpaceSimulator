@@ -4,6 +4,11 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+import ctypes
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PerMonitorV2
+except:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)  # System
 
 import pygame
 
