@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Testing / coverage (if reintroduced)
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Logs and runtime output
+logs/
+*.log
+
+# Type checkers / linters
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local env / secrets
+.env
+.env.*
+
+# PyInstaller local build dirs (standalone/linux binary is tracked)
+build/
+dist/

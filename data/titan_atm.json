@@ -1,0 +1,20 @@
+{
+  "units": {
+    "alt_m": "m",
+    "rho_kg_m3": "kg/m^3",
+    "t_ext_c": "degC",
+    "p_bar": "bar"
+  },
+  "composition": "Bulk atmosphere per mission references: N2 ~95%, CH4 ~5% (simulation uses continuum rho/T/P only).",
+  "note": "Synthetic Titan atmosphere profile for prototype. Surface pressure aligned to ~1.5 bar per Huygens/HASI order of magnitude. Replace arrays with published HASI tables for higher fidelity.",
+  "sources": [
+    "https://sci.esa.int/web/cassini-huygens/-/47052-huygens",
+    "https://www.esa.int/Science_Exploration/Space_Science/Cassini-Huygens",
+    "https://planetarydata.jpl.nasa.gov/"
+  ],
+  "alt_m": [0, 1000, 5000, 10000, 20000, 40000, 60000, 80000, 100000, 120000, 140000, 160000, 180000],
+  "t_ext_c": [-179.35, -178.8, -170.2, -160.5, -142.3, -115.8, -90.4, -75.1, -65.2, -70.8, -85.3, -105.6, -125.4],
+  "p_bar": [1.5, 1.44, 1.15, 0.78, 0.32, 0.095, 0.032, 0.012, 0.0048, 0.0021, 0.0009, 0.0004, 0.00018],
+  "rho_kg_m3": [5.89, 5.65, 4.32, 2.85, 1.02, 0.28, 0.098, 0.037, 0.015, 0.0065, 0.0029, 0.0013, 0.0006]
+}
+

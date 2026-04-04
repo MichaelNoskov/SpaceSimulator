@@ -1,0 +1,7 @@
+{
+  "description": "Companion metadata for surface_map.csv (binary/land mask grid used as a prototype asset; not loaded by the simulator runtime at present).",
+  "sources": [
+    "https://sci.esa.int/web/cassini-huygens/-/47052-huygens",
+    "https://planetarydata.jpl.nasa.gov/"
+  ]
+}
