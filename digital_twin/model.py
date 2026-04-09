@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Deque, Optional, TextIO
+from typing import Any, Deque, Optional, TextIO, Tuple
 
 import numpy as np
 
@@ -61,6 +61,8 @@ class PhysicsModel:
         self._world = WorldGen(seed=int(seed))
 
         self._telemetry_history: Deque[dict[str, float]] = deque(maxlen=15000)
+        # (sim_time_s, tag_id, detail) — successful commands for mission plots (auto + manual).
+        self._plot_action_log: Deque[Tuple[float, str, str]] = deque(maxlen=12000)
         self._reset_state()
         self._target = self._make_target_at(0.0, 0.0)
 
@@ -128,6 +130,7 @@ class PhysicsModel:
         self._water_landed: bool = False
         self._t_main_deployed_s: Optional[float] = None
         self._telemetry_history.clear()
+        self._plot_action_log.clear()
 
     def reset(self) -> None:
         self._close_csv_log()
@@ -905,6 +908,15 @@ class PhysicsModel:
     @property
     def telemetry_history(self) -> list[dict[str, float]]:
         return list(self._telemetry_history)
+
+    @property
+    def plot_action_log(self) -> list[Tuple[float, str, str]]:
+        """Actions that reached the model (autopilot, levers, target). Used on telemetry graphs."""
+        return list(self._plot_action_log)
+
+    def log_plot_action(self, tag_id: str, detail: str = "") -> None:
+        """Record a discrete command at current simulation time (call from Controller.apply)."""
+        self._plot_action_log.append((float(self.time_s), str(tag_id), str(detail)))
 
     def _land_cleanup_touchdown(self) -> None:
         self._engine_on = False

@@ -43,33 +43,38 @@ class Controller:
         self.apply(cmd)
 
     def apply(self, cmd: Command) -> None:
+        m = self.model
         # Target selection (pure data update)
         if cmd.set_target_world is not None:
-            self.model.set_target_world(cmd.set_target_world[0], cmd.set_target_world[1])
+            m.set_target_world(cmd.set_target_world[0], cmd.set_target_world[1])
+            m.log_plot_action("TGT", "")
 
         # Engine toggle (explicit)
         if cmd.engine_on is not None:
-            self.model.set_engine(bool(cmd.engine_on))
+            prev_on = bool(m.engine_on)
+            m.set_engine(bool(cmd.engine_on))
+            if prev_on != bool(m.engine_on):
+                m.log_plot_action("EN", "ON" if m.engine_on else "OFF")
 
         # Throttle continuous (only meaningful when engine on)
         if cmd.throttle_0_1 is not None:
-            self.model.set_throttle(float(np.clip(cmd.throttle_0_1, 0.0, 1.0)))
+            m.set_throttle(float(np.clip(cmd.throttle_0_1, 0.0, 1.0)))
 
         # One-shot event requests with validation rules.
-        if cmd.request_heatshield_jettison:
-            self.model.request_heatshield_jettison()
+        if cmd.request_heatshield_jettison and m.request_heatshield_jettison():
+            m.log_plot_action("HS", "")
 
-        if cmd.request_drogue:
-            self.model.request_drogue()
+        if cmd.request_drogue and m.request_drogue():
+            m.log_plot_action("DR", "")
 
-        if cmd.request_main:
-            self.model.request_main()
+        if cmd.request_main and m.request_main():
+            m.log_plot_action("MN", "")
 
-        if cmd.request_chute_jettison:
-            self.model.request_chute_jettison()
+        if cmd.request_chute_jettison and m.request_chute_jettison():
+            m.log_plot_action("CJ", "")
 
         if cmd.request_toggle_csv_logging:
-            self.model.set_csv_logging(not self.model.csv_logging_enabled)
+            m.set_csv_logging(not m.csv_logging_enabled)
 
     # UI helpers (lever availability)
     def can_heatshield_jettison(self) -> bool:

@@ -94,8 +94,18 @@ I18N = {
         "mission_blueprint_title": "Пакет документации посадки",
         "mission_photo_label": "Кадр площадки (синтез)",
         "mission_no_plots": "Недостаточно точек телеметрии",
-        "mission_plot_legend": "События: HS — теплозащита, DR — тормоз, MN — основной, CJ — сброс, EN — двигатель (▼ выкл)",
+        "mission_plot_legend": (
+            "Вертикаль: HS теплозащита, DR тормозной, MN основной, CJ сброс, EN двигатель (▼ выкл), "
+            "TGT цель. Подписи у линий — команды, дошедшие до модели (ручной и авто режим)."
+        ),
         "mission_axis_t": "Время полёта",
+        "plot_evt_hs": "HS · теплозащита",
+        "plot_evt_dr": "DR · тормозной",
+        "plot_evt_mn": "MN · основной",
+        "plot_evt_cj": "CJ · сброс",
+        "plot_evt_en_on": "EN · вкл",
+        "plot_evt_en_off": "EN · выкл",
+        "plot_evt_tgt": "TGT · цель",
     },
     "EN": {
         "title": "Titan Landing Simulator",
@@ -167,8 +177,18 @@ I18N = {
         "mission_blueprint_title": "Landing documentation pack",
         "mission_photo_label": "Site frame (synthetic)",
         "mission_no_plots": "Not enough telemetry samples",
-        "mission_plot_legend": "Events: HS heatshield, DR drogue, MN main, CJ jettison, EN engine (▼ off)",
+        "mission_plot_legend": (
+            "Markers: HS heatshield, DR drogue, MN main, CJ jettison, EN engine (▼ off), "
+            "TGT map target. Labels are commands applied to the model (manual and auto)."
+        ),
         "mission_axis_t": "Mission time",
+        "plot_evt_hs": "HS · heatshield",
+        "plot_evt_dr": "DR · drogue",
+        "plot_evt_mn": "MN · main",
+        "plot_evt_cj": "CJ · jettison",
+        "plot_evt_en_on": "EN · on",
+        "plot_evt_en_off": "EN · off",
+        "plot_evt_tgt": "TGT · target",
     },
 }
 
@@ -2202,15 +2222,51 @@ class UI:
             return f"{h}:{m:02d}:{s:02d}"
         return f"{m:02d}:{s:02d}"
 
-    def _telemetry_user_events(self, hist: list[dict]) -> list[tuple[float, tuple[int, int, int], int]]:
-        """User actions: (t_rel_s, rgb, tri_dir) tri_dir 1 = marker at top (▼), -1 = at bottom (▲ off)."""
+    def _plot_event_caption(self, tag_id: str, detail: str) -> str:
+        if tag_id == "EN":
+            return self.t("plot_evt_en_on") if detail == "ON" else self.t("plot_evt_en_off")
+        key = f"plot_evt_{tag_id.lower()}"
+        return self.t(key)
+
+    def _plot_markers_from_log(
+        self, hist: list[dict], c: Controller
+    ) -> list[tuple[float, tuple[int, int, int], int, str, str]]:
+        """(t_rel, rgb, tri_dir, tag_id, label) from Controller-registered actions."""
+        if len(hist) < 1:
+            return []
+        t0 = float(hist[0]["t_s"])
+        t_end = float(hist[-1]["t_s"])
+        col_hs = (200, 95, 40)
+        col_dr = (40, 150, 185)
+        col_mn = (45, 130, 65)
+        col_cj = (155, 55, 155)
+        col_tgt = (95, 90, 155)
+        colors = {"HS": col_hs, "DR": col_dr, "MN": col_mn, "CJ": col_cj, "TGT": col_tgt}
+        out: list[tuple[float, tuple[int, int, int], int, str, str]] = []
+        for ts, tag, det in c.model.plot_action_log:
+            if ts < t0 - 1e-9 or ts > t_end + 1e-9:
+                continue
+            tr = float(ts) - t0
+            if tag == "EN":
+                tri = 1 if det == "ON" else -1
+                col = (215, 165, 40) if det == "ON" else (115, 75, 45)
+            else:
+                tri = 1
+                col = colors.get(tag, (130, 130, 140))
+            out.append((tr, col, tri, tag, self._plot_event_caption(tag, det)))
+        return out
+
+    def _markers_from_telemetry_diff(
+        self, hist: list[dict]
+    ) -> list[tuple[float, tuple[int, int, int], int, str, str]]:
+        """Fallback when plot log is empty or missing an edge: (t_rel, rgb, tri, tag_id, label)."""
         col_hs = (200, 95, 40)
         col_dr = (40, 150, 185)
         col_mn = (45, 130, 65)
         col_cj = (155, 55, 155)
         col_en_on = (215, 165, 40)
         col_en_off = (115, 75, 45)
-        out: list[tuple[float, tuple[int, int, int], int]] = []
+        out: list[tuple[float, tuple[int, int, int], int, str, str]] = []
         if len(hist) < 2:
             return out
 
@@ -2223,22 +2279,44 @@ class UI:
             tr = float(cur["t_s"]) - t0
             a, b = _g(prev, "hs"), _g(cur, "hs")
             if a < 0.5 and b > 0.5:
-                out.append((tr, col_hs, 1))
+                out.append((tr, col_hs, 1, "HS", self._plot_event_caption("HS", "")))
             a, b = _g(prev, "dr"), _g(cur, "dr")
             if a < 0.5 and b > 0.5:
-                out.append((tr, col_dr, 1))
+                out.append((tr, col_dr, 1, "DR", self._plot_event_caption("DR", "")))
             a, b = _g(prev, "mn"), _g(cur, "mn")
             if a < 0.5 and b > 0.5:
-                out.append((tr, col_mn, 1))
+                out.append((tr, col_mn, 1, "MN", self._plot_event_caption("MN", "")))
             a, b = _g(prev, "cj"), _g(cur, "cj")
             if a < 0.5 and b > 0.5:
-                out.append((tr, col_cj, 1))
+                out.append((tr, col_cj, 1, "CJ", self._plot_event_caption("CJ", "")))
             a, b = _g(prev, "eng"), _g(cur, "eng")
             if a < 0.5 and b > 0.5:
-                out.append((tr, col_en_on, 1))
+                out.append((tr, col_en_on, 1, "EN", self._plot_event_caption("EN", "ON")))
             elif a > 0.5 and b < 0.5:
-                out.append((tr, col_en_off, -1))
+                out.append((tr, col_en_off, -1, "EN", self._plot_event_caption("EN", "OFF")))
         return out
+
+    def _merge_plot_markers(
+        self,
+        from_log: list[tuple[float, tuple[int, int, int], int, str, str]],
+        from_state: list[tuple[float, tuple[int, int, int], int, str, str]],
+        eps_s: float = 0.35,
+    ) -> list[tuple[float, tuple[int, int, int], int, str, str]]:
+        merged = list(from_log)
+        for s in from_state:
+            tr_s, col, tri, tid, lab = s
+            if any(abs(tr_s - tr_l) < eps_s and tid_l == tid for tr_l, _, _, tid_l, _ in from_log):
+                continue
+            merged.append(s)
+        merged.sort(key=lambda x: x[0])
+        return merged
+
+    def _mission_graph_markers(self, hist: list[dict], c: Controller) -> list[tuple[float, tuple[int, int, int], int, str]]:
+        """Markers for drawing: t_rel, color, tri_dir, caption."""
+        log_m = self._plot_markers_from_log(hist, c)
+        st_m = self._markers_from_telemetry_diff(hist)
+        full = self._merge_plot_markers(log_m, st_m) if log_m else st_m
+        return [(a, b, c, e) for a, b, c, _, e in full]
 
     def _draw_plot_blueprint(
         self,
@@ -2248,9 +2326,11 @@ class UI:
         ys: list[float],
         title: str,
         color: tuple[int, int, int],
-        events: Optional[list[tuple[float, tuple[int, int, int], int]]] = None,
+        events: Optional[list[tuple[float, tuple[int, int, int], int, str]]] = None,
+        y_tick_fmt: Callable[[float], str] | None = None,
     ) -> None:
         events = events or []
+        yfmt = y_tick_fmt or (lambda v: f"{v:.2f}")
         paper = (228, 224, 212)
         grid_maj = (200, 196, 180)
         grid_min = (216, 212, 200)
@@ -2260,7 +2340,13 @@ class UI:
         inner = rect.inflate(-10, -22)
         inner.y += 12
         axis_h = max(44, int(50 * self.ui_scale))
-        plot_inner = pygame.Rect(inner.left, inner.top, inner.width, max(12, inner.height - axis_h))
+        y_axis_w = max(44, int(50 * self.ui_scale))
+        plot_inner = pygame.Rect(
+            inner.left + y_axis_w,
+            inner.top,
+            max(12, inner.width - y_axis_w - 4),
+            max(12, inner.height - axis_h),
+        )
 
         step = max(8, int(12 * self.ui_scale))
         gx = plot_inner.left
@@ -2306,6 +2392,16 @@ class UI:
         def _x_to_px(t_rel: float) -> int:
             return int(plot_inner.left + (float(t_rel) - xl0) / (xl1 - xl0) * plot_inner.width)
 
+        ny = 5
+        for k in range(ny + 1):
+            yv = ymin + (ymax - ymin) * (k / float(ny))
+            ty = (yv - ymin) / (ymax - ymin)
+            py = int(plot_inner.bottom - ty * plot_inner.height)
+            pygame.draw.line(surf, ink, (plot_inner.left - 5, py), (plot_inner.left, py), 2)
+            tl = self._cached_render(self.font_small, yfmt(yv), ink)
+            lx = plot_inner.left - 8 - tl.get_width()
+            surf.blit(tl, (lx, int(np.clip(py - tl.get_height() // 2, inner.top, inner.bottom - tl.get_height()))))
+
         pts: list[tuple[int, int]] = []
         for i in range(n):
             tx = (float(xs[i]) - xl0) / (xl1 - xl0)
@@ -2330,14 +2426,19 @@ class UI:
             surf.blit(tl, (lx, tick_y))
 
         tri_s = max(5, int(6 * self.ui_scale))
-        for t_rel, evc, tri_dir in events:
+        by_px: dict[int, list[tuple[tuple[int, int, int], int, str]]] = {}
+        for t_rel, evc, tri_dir, caption in events:
             if t_rel < xl0 - 1e-6 or t_rel > xl1 + 1e-6:
                 continue
             px = _x_to_px(t_rel)
             if px < plot_inner.left - 2 or px > plot_inner.right + 2:
                 continue
-            pygame.draw.line(surf, evc, (px, plot_inner.top), (px, plot_inner.bottom), 2)
-            if tri_dir >= 0:
+            by_px.setdefault(px, []).append((evc, tri_dir, caption))
+        for px in sorted(by_px.keys()):
+            group = by_px[px]
+            evc0, tri_dir0, _cap0 = group[0]
+            pygame.draw.line(surf, evc0, (px, plot_inner.top), (px, plot_inner.bottom), 2)
+            if tri_dir0 >= 0:
                 pts_t = [(px, plot_inner.top), (px - tri_s, plot_inner.top + tri_s + 2), (px + tri_s, plot_inner.top + tri_s + 2)]
             else:
                 pts_t = [
@@ -2345,8 +2446,17 @@ class UI:
                     (px - tri_s, plot_inner.bottom - tri_s - 2),
                     (px + tri_s, plot_inner.bottom - tri_s - 2),
                 ]
-            pygame.draw.polygon(surf, evc, pts_t)
+            pygame.draw.polygon(surf, evc0, pts_t)
             pygame.draw.polygon(surf, ink, pts_t, 1)
+            ly0 = plot_inner.top + 4
+            for gi, (_evc, _tri, caption) in enumerate(group):
+                cap_s = self._cached_render(self.font_small, caption, ink)
+                prefer_right = px < plot_inner.left + plot_inner.width // 2
+                lx = (px + 5) if prefer_right else (px - 5 - cap_s.get_width())
+                lx = int(np.clip(lx, inner.left + 2, plot_inner.right - cap_s.get_width() - 2))
+                ycap = ly0 + gi * (cap_s.get_height() + 2)
+                if ycap + cap_s.get_height() < plot_inner.bottom - 6:
+                    surf.blit(cap_s, (lx, ycap))
 
     def _draw_landing_site_snapshot(self, surf: pygame.Surface, frame: pygame.Rect, c: Controller) -> None:
         if frame.width < 12 or frame.height < 12:
@@ -2450,15 +2560,15 @@ class UI:
         if len(hist) >= 2:
             t0 = float(hist[0]["t_s"])
             xs = [float(p["t_s"]) - t0 for p in hist]
-            user_events = self._telemetry_user_events(hist)
+            markers = self._mission_graph_markers(hist, c)
             series = (
-                ([float(p["altitude_m"]) / 1000.0 for p in hist], self.t("plot_h_km"), colors[0]),
-                ([float(p["v_vert_mps"]) for p in hist], self.t("plot_v_vert"), colors[1]),
-                ([float(p["g_load"]) for p in hist], self.t("plot_g"), colors[2]),
+                ([float(p["altitude_m"]) / 1000.0 for p in hist], self.t("plot_h_km"), colors[0], lambda v: f"{v:.2f}"),
+                ([float(p["v_vert_mps"]) for p in hist], self.t("plot_v_vert"), colors[1], lambda v: f"{v:.0f}"),
+                ([float(p["g_load"]) for p in hist], self.t("plot_g"), colors[2], lambda v: f"{v:.2f}"),
             )
             for i, pr in enumerate(plots):
-                ys, ptitle, col = series[i]
-                self._draw_plot_blueprint(surf, pr, xs, ys, ptitle, col, user_events)
+                ys, ptitle, col, yfmt = series[i]
+                self._draw_plot_blueprint(surf, pr, xs, ys, ptitle, col, markers, yfmt)
         else:
             empty = self._cached_render(self.font_small, self.t("mission_no_plots"), (80, 60, 45))
             surf.blit(empty, (g.plot0.left + 8, g.plot0.top + 8))
