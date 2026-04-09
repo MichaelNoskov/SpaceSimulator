@@ -80,7 +80,8 @@ The simulation **stays paused** while the editor is open. The hint panel links t
 |--------|--------|
 | **Save** | Compile, validate `tick` (below); on success close the editor and return to the pause menu |
 | **Cancel** | Restore the last **successfully saved** text and close the editor (**Esc** does the same) |
-| **Default** | Load the built-in sample (`DEFAULT_SCRIPT`) into the editor **without** applying it as the active flight program until you save |
+| **Template: spec** | Load the default program (`DEFAULT_SCRIPT`) — requests each stage as soon as `can_*` allows (simulator spec behavior) |
+| **Template: Huygens** | Load a **time-gated** script (`HUYGENS_SCRIPT`) loosely following Cassini–Huygens ordering (~15 min passive entry, then heatshield when Mach allows, drogue/main later; final engine as in the game — the real probe had no rocket). **Not** saved until you click Save |
 
 ### Hints and typing
 
@@ -117,4 +118,4 @@ Exceptions inside **`tick`** (other than the internal **`sleep`** mechanism) tur
 
 - API: `flight_program/runner.py`
 - Syntax highlighting: `flight_program/highlighter.py`
-- Default script: `DEFAULT_SCRIPT` in `flight_program/runner.py`
+- Built-in templates: `DEFAULT_SCRIPT`, `HUYGENS_SCRIPT` in `flight_program/runner.py`

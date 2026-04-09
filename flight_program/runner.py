@@ -25,6 +25,31 @@ DEFAULT_SCRIPT = """def tick(sim, ap):
         ap.set_throttle_slider(cmd)
 """
 
+# Approximate Cassini–Huygens descent *timeline* (model time), not a replay of telemetry.
+# Real probe had no final rocket; this script still uses the simulator engine for soft landing.
+HUYGENS_SCRIPT = """def tick(sim, ap):
+    # ~0–15 min: hypersonic entry; stay passive (no separations in the real early phase).
+    if sim.time_s < 900:
+        return
+    # Backshell / forward shield class release when Mach allows (same gate as ТЗ).
+    if sim.can_heatshield_jettison:
+        ap.request_heatshield_jettison()
+    # Pilot parachute a few tens of seconds after aeroshell (real ~17 s class delay).
+    if sim.time_s >= 950 and sim.can_drogue:
+        ap.request_drogue()
+    # Main canopy later in descent (order of ~30 min model time); altitude gates still apply.
+    if sim.time_s >= 1800 and sim.can_main:
+        ap.request_main()
+    if sim.can_chute_jettison:
+        ap.request_chute_jettison()
+    if sim.altitude_m < sim.parachute_jettison_max_alt_m and sim.chute_jettisoned:
+        ap.set_engine(True)
+        target_v = -20.0 if sim.altitude_m > 200.0 else -4.0
+        error = target_v - sim.vertical_speed_mps
+        cmd = ap.clamp(0.02 * error, 0.0, 1.0)
+        ap.set_throttle_slider(cmd)
+"""
+
 # Full identifiers for hint panel and Tab completion (longest first helps some UIs; sorted for display)
 SIM_API_COMPLETIONS: tuple[str, ...] = (
     "sim.parachute_jettison_max_alt_m",

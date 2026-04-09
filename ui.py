@@ -15,6 +15,7 @@ from digital_twin.model import SimResult
 from flight_program import (
     AP_API_COMPLETIONS,
     DEFAULT_SCRIPT,
+    HUYGENS_SCRIPT,
     FlightProgramRunner,
     SIM_API_COMPLETIONS,
     compile_flight_program,
@@ -64,7 +65,7 @@ I18N = {
         "help_body": (
             "Клик по мини-карте — выбор точки посадки.\n"
             "Рычаги: зелёный индикатор — можно включить.\n"
-            "Авто: логика из пункта меню «Программирование полёта» (Python, функция tick(sim, ap)).\n"
+            "Авто: логика из «Программирования полёта» (Python, tick(sim, ap)); по умолчанию — шаблон ТЗ, в редакторе можно подставить шаблон Huygens.\n"
             "Esc / Пробел — меню паузы (продолжить, авто/ручной, язык, рестарт, CSV, программа полёта, выход). R — рестарт, A — авто/ручной, F1 — эта справка.\n"
             "+/− — скорость времени, F11 — полный экран.\n"
             "После завершения полёта — «Досье миссии»: чертежи телеметрии и вид площадки посадки."
@@ -76,8 +77,9 @@ I18N = {
         "fp_title": "Программа автопилота",
         "fp_save": "Сохранить",
         "fp_cancel": "Отменить",
-        "fp_reset_default": "К шаблону",
-        "fp_hint": "Определите tick(sim, ap). sim — показания, ap — команды (см. подсказку в коде).",
+        "fp_reset_default": "Шаблон: ТЗ",
+        "fp_reset_huygens": "Шаблон: Huygens",
+        "fp_hint": "Определите tick(sim, ap). sim — показания, ap — команды. Внизу: два шаблона (ТЗ и Huygens) — подставить в редактор без сохранения.",
         "fp_compile_error": "Ошибка программы",
         "fp_runtime_error": "Ошибка в полёте, авто выкл.",
         "fp_validate_error": "Проверка tick()",
@@ -148,7 +150,7 @@ I18N = {
         "help_body": (
             "Click the minimap to set a landing target.\n"
             "Levers: green lamp means the action is allowed.\n"
-            "Auto: logic from pause menu «Flight program» (Python, tick(sim, ap)).\n"
+            "Auto: «Flight program» (Python, tick(sim, ap)); default template matches the simulator spec; editor can load a Huygens-style timeline template.\n"
             "Esc / Space — pause menu (resume, auto/manual, lang, restart, CSV, flight program, quit). R — restart, A — auto/manual, F1 — this help.\n"
             "+/− — time speed, F11 — fullscreen.\n"
             "After landing, open «Mission dossier» for telemetry drawings and a landing site view."
@@ -160,8 +162,9 @@ I18N = {
         "fp_title": "Autopilot program",
         "fp_save": "Save",
         "fp_cancel": "Cancel",
-        "fp_reset_default": "Default",
-        "fp_hint": "Define tick(sim, ap). sim reads instruments; ap sends commands.",
+        "fp_reset_default": "Template: spec",
+        "fp_reset_huygens": "Template: Huygens",
+        "fp_hint": "Define tick(sim, ap). sim reads instruments; ap sends commands. Footer: two templates (spec vs Huygens) load into the editor without saving.",
         "fp_compile_error": "Program error",
         "fp_runtime_error": "Runtime error, auto off.",
         "fp_validate_error": "tick() check failed",
@@ -371,7 +374,8 @@ class _FlightProgramEditorGeom(NamedTuple):
     panel: pygame.Rect
     text_area: pygame.Rect
     hint_panel: pygame.Rect
-    default_btn: pygame.Rect
+    template_spec_btn: pygame.Rect
+    template_huygens_btn: pygame.Rect
     save_btn: pygame.Rect
     cancel_btn: pygame.Rect
 
@@ -729,8 +733,11 @@ class UI:
                 return
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 g = self._flight_program_editor_geometry()
-                if g.default_btn.collidepoint(event.pos):
-                    self._flight_program_reset_to_default()
+                if g.template_spec_btn.collidepoint(event.pos):
+                    self._flight_program_load_template("spec")
+                    return
+                if g.template_huygens_btn.collidepoint(event.pos):
+                    self._flight_program_load_template("huygens")
                     return
                 if g.save_btn.collidepoint(event.pos):
                     self._flight_program_save(c)
@@ -891,12 +898,15 @@ class UI:
         text_w = max(int(200 * self.ui_scale), inner_w - split_gap - hint_w)
         text_area = pygame.Rect(panel.left + pad, top_y, text_w, body_h)
         hint_panel = pygame.Rect(text_area.right + split_gap, top_y, hint_w, body_h)
-        def_w = min(int(168 * self.ui_scale), int(inner_w * 0.22))
-        def_w = max(def_w, int(120 * self.ui_scale))
-        default_btn = pygame.Rect(panel.left + pad, panel.bottom - pad - btn_h, def_w, btn_h)
+        tw = min(int(168 * self.ui_scale), int(inner_w * 0.22))
+        tw = max(tw, int(108 * self.ui_scale))
+        template_spec_btn = pygame.Rect(panel.left + pad, panel.bottom - pad - btn_h, tw, btn_h)
+        template_huygens_btn = pygame.Rect(template_spec_btn.right + gap, template_spec_btn.top, tw, btn_h)
         save_btn = pygame.Rect(panel.right - pad - 2 * btn_w - gap, panel.bottom - pad - btn_h, btn_w, btn_h)
         cancel_btn = pygame.Rect(panel.right - pad - btn_w, panel.bottom - pad - btn_h, btn_w, btn_h)
-        return _FlightProgramEditorGeom(panel, text_area, hint_panel, default_btn, save_btn, cancel_btn)
+        return _FlightProgramEditorGeom(
+            panel, text_area, hint_panel, template_spec_btn, template_huygens_btn, save_btn, cancel_btn
+        )
 
     def _flight_program_open_editor(self) -> None:
         self.esc_menu_open = False
@@ -1126,8 +1136,10 @@ class UI:
             pass
         return self._fp_internal_clipboard
 
-    def _flight_program_reset_to_default(self) -> None:
-        self._fp_lines = DEFAULT_SCRIPT.split("\n")
+    def _flight_program_load_template(self, which: str) -> None:
+        """Load built-in script into the editor (does not save). `which`: 'spec' | 'huygens'."""
+        src = DEFAULT_SCRIPT if which == "spec" else HUYGENS_SCRIPT
+        self._fp_lines = src.split("\n")
         if not self._fp_lines:
             self._fp_lines = [""]
         self._fp_cy = 0
@@ -1421,7 +1433,8 @@ class UI:
             t = self._cached_render(self.font_small, label, (235, 235, 240))
             surf.blit(t, t.get_rect(center=rect.center))
 
-        pill(g.default_btn, self.t("fp_reset_default"), True)
+        pill(g.template_spec_btn, self.t("fp_reset_default"), True)
+        pill(g.template_huygens_btn, self.t("fp_reset_huygens"), True)
         pill(g.save_btn, self.t("fp_save"), True)
         pill(g.cancel_btn, self.t("fp_cancel"), True)
         if self._fp_compile_error:

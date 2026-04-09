@@ -3,6 +3,7 @@ from __future__ import annotations
 from .runner import (
     AP_API_COMPLETIONS,
     DEFAULT_SCRIPT,
+    HUYGENS_SCRIPT,
     AutopilotActions,
     DryRunAutopilotActions,
     FlightProgramRunner,
@@ -16,6 +17,7 @@ from .runner import (
 __all__ = [
     "AP_API_COMPLETIONS",
     "DEFAULT_SCRIPT",
+    "HUYGENS_SCRIPT",
     "AutopilotActions",
     "DryRunAutopilotActions",
     "FlightProgramRunner",
