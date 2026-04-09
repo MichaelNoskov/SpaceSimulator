@@ -41,7 +41,7 @@ def tick(sim, ap):
 | `can_heatshield_jettison`, `can_drogue`, `can_main`, `can_chute_jettison` | Можно ли выполнить действие |
 | `fuel_kg` | Топливо, кг |
 | `g_load` | Перегрузка, g |
-| `atm_pressure_bar`, `internal_temp_c` | Давление, внутренняя температура |
+| `atm_pressure_bar`, `internal_temp_c`, `heatshield_skin_temp_c` | Давление, температура отсеков, температура обшивки (пока теплозащита не сброшена) |
 | `distance_to_target_m` | До цели по карте, м |
 | `stat(key, default)` | Доп. поля из HUD (`h_km`, `v_vert`, `dist_m`, …) |
 

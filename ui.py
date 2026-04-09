@@ -32,6 +32,7 @@ I18N = {
         "g": "Перегрузка",
         "t_ext": "Т наружная",
         "t_int": "Т внутр.",
+        "t_hs_skin": "Обшивка",
         "p": "Давление",
         "fuel": "Топливо",
         "surface": "Поверхность",
@@ -66,7 +67,7 @@ I18N = {
             "Авто: логика из пункта меню «Программирование полёта» (Python, функция tick(sim, ap)).\n"
             "Esc / Пробел — меню паузы (продолжить, авто/ручной, язык, рестарт, CSV, программа полёта, выход). R — рестарт, A — авто/ручной, F1 — эта справка.\n"
             "+/− — скорость времени, F11 — полный экран.\n"
-            "После завершения полёта — «Досье миссии»: чертежи телеметрии и синтетический снимок площадки."
+            "После завершения полёта — «Досье миссии»: чертежи телеметрии и вид площадки посадки."
         ),
         "esc_resume": "Продолжить",
         "esc_quit": "Выйти",
@@ -92,7 +93,7 @@ I18N = {
         "mission_close": "Закрыть",
         "mission_new_flight": "Новый полёт",
         "mission_blueprint_title": "Пакет документации посадки",
-        "mission_photo_label": "Кадр площадки (синтез)",
+        "mission_photo_label": "Площадка посадки",
         "mission_no_plots": "Недостаточно точек телеметрии",
         "mission_plot_legend": (
             "Вертикаль: HS теплозащита, DR тормозной, MN основной, CJ сброс, EN двигатель (▼ выкл), "
@@ -115,6 +116,7 @@ I18N = {
         "g": "G-load",
         "t_ext": "Temp ext",
         "t_int": "Temp int",
+        "t_hs_skin": "Heatshield",
         "p": "Pressure",
         "fuel": "Fuel",
         "surface": "Surface",
@@ -149,7 +151,7 @@ I18N = {
             "Auto: logic from pause menu «Flight program» (Python, tick(sim, ap)).\n"
             "Esc / Space — pause menu (resume, auto/manual, lang, restart, CSV, flight program, quit). R — restart, A — auto/manual, F1 — this help.\n"
             "+/− — time speed, F11 — fullscreen.\n"
-            "After landing, open «Mission dossier» for telemetry drawings and a synthetic site snapshot."
+            "After landing, open «Mission dossier» for telemetry drawings and a landing site view."
         ),
         "esc_resume": "Resume",
         "esc_quit": "Quit",
@@ -175,7 +177,7 @@ I18N = {
         "mission_close": "Close",
         "mission_new_flight": "New flight",
         "mission_blueprint_title": "Landing documentation pack",
-        "mission_photo_label": "Site frame (synthetic)",
+        "mission_photo_label": "Landing site",
         "mission_no_plots": "Not enough telemetry samples",
         "mission_plot_legend": (
             "Markers: HS heatshield, DR drogue, MN main, CJ jettison, EN engine (▼ off), "
@@ -1446,6 +1448,7 @@ class UI:
             "g": float(c.model.g_load),
             "t_ext": float(c.model.atm_temp_ext_c),
             "t_int": float(c.model.internal_temp_c),
+            "t_hs_skin": float(c.model.heatshield_skin_temp_c),
             "p": float(c.model.atm_pressure_bar),
             "fuel_pct": 100.0 * (float(c.model.fuel_kg) / 50.0),
             "surface": c.model.surface_type_under_probe.value,
@@ -1711,6 +1714,8 @@ class UI:
         temp_c: float,
         vmin: float = -220.0,
         vmax: float = 50.0,
+        *,
+        skin_entry: bool = False,
     ) -> None:
         pygame.draw.rect(surf, (24, 24, 28), rect, border_radius=10)
         pygame.draw.rect(surf, (120, 120, 135), rect, width=2, border_radius=10)
@@ -1744,7 +1749,18 @@ class UI:
         fill = pygame.Rect(tube.left + pad, tube.bottom - (pad + 1) - fill_h, max(1, tube.width - 2 * pad), fill_h)
 
         # color by temperature
-        if temp_c < -120:
+        if skin_entry:
+            if temp_c < -100:
+                col = (90, 160, 255)
+            elif temp_c < 200:
+                col = (130, 220, 160)
+            elif temp_c < 700:
+                col = (255, 150, 60)
+            elif temp_c < 1400:
+                col = (255, 210, 90)
+            else:
+                col = (255, 245, 220)
+        elif temp_c < -120:
             col = (80, 170, 255)   # cold
         elif temp_c < -30:
             col = (120, 230, 190)  # ok
@@ -1754,7 +1770,14 @@ class UI:
         pygame.draw.circle(surf, col, bulb_c, max(3, bulb_r - int(3 * self.ui_scale)))
 
         # ticks
-        for tv in [-200, -180, -150, -120, -90, -60, -30, 0]:
+        tick_vals = (
+            [-200, 0, 400, 800, 1200, 1800]
+            if skin_entry
+            else [-200, -180, -150, -120, -90, -60, -30, 0]
+        )
+        for tv in tick_vals:
+            if tv < vmin or tv > vmax:
+                continue
             tt = (tv - vmin) / max(1e-9, (vmax - vmin))
             yy = tube.bottom - (pad + 1) - int(np.clip(tt, 0.0, 1.0) * (tube.height - 2 * pad - 2))
             pygame.draw.line(surf, (180, 180, 190), (tube.right + 4, yy), (tube.right + 8, yy), 1)
@@ -1785,6 +1808,7 @@ class UI:
         fuel = float(self.stats.get("fuel_pct", 0.0))
         t_ext = float(self.stats.get("t_ext", 0.0))
         t_int = float(self.stats.get("t_int", 0.0))
+        t_hs_skin = float(self.stats.get("t_hs_skin", -150.0))
         g_load = float(self.stats.get("g", 0.0))
 
         # --- top-center: mission time (NASA-like HH:MM:SS) ---
@@ -1835,8 +1859,13 @@ class UI:
 
         # Place center a bit below dial bottom (higher than previous midtop layout).
         center_y = int(dial1_c[1] + dial_r + (therm_h * 0.36))
-        therm1.center = (dial1_c[0], center_y)
-        therm2.center = (dial2_c[0], center_y)
+        dial_span = max(1, dial2_c[0] - dial1_c[0])
+        therm_inset = int(min(26 * self.ui_scale, max(6, dial_span * 0.11)))
+        therm1.center = (dial1_c[0] + therm_inset, center_y)
+        therm2.center = (dial2_c[0] - therm_inset, center_y)
+        therm_hs_w = int(np.clip(56 * self.ui_scale, 50 * self.ui_scale, 64 * self.ui_scale))
+        therm_hs = pygame.Rect(0, 0, therm_hs_w, therm_h)
+        therm_hs.center = ((dial1_c[0] + dial2_c[0]) // 2, center_y)
 
         # Digital G display between thermometers.
         g_rect = pygame.Rect(0, 0, int(160 * self.ui_scale), int(56 * self.ui_scale))
@@ -1867,6 +1896,8 @@ class UI:
         panel_bg(main_bg.inflate(2 * pad, 2 * pad))
         # Separate lower background for thermometers only (keeps it lower, avoids overlap).
         thermo_bg = therm1.union(therm2)
+        if not c.model.heatshield_jettisoned:
+            thermo_bg = thermo_bg.union(therm_hs)
         panel_bg(thermo_bg.inflate(2 * pad, 2 * pad))
 
         # v_vert zones (abs speed)
@@ -1934,6 +1965,16 @@ class UI:
 
         # Temperatures (thermometers)
         self._draw_thermometer(surf, therm1, self.t("t_ext"), t_ext)
+        if not c.model.heatshield_jettisoned:
+            self._draw_thermometer(
+                surf,
+                therm_hs,
+                self.t("t_hs_skin"),
+                t_hs_skin,
+                vmin=-200.0,
+                vmax=2000.0,
+                skin_entry=True,
+            )
         self._draw_thermometer(surf, therm2, self.t("t_int"), t_int)
 
         # Digital G-load display (replaces text block)

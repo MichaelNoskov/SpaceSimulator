@@ -588,17 +588,27 @@ class Renderer:
         return float(np.clip(1.2 - 0.0006 * h_km, 0.5, 1.2))
 
     def _heatshield_color(self, model: PhysicsModel) -> tuple[int, int, int]:
-        # Approximate "charring" based on dynamic pressure proxy ~ rho * v^2.
+        # Char from dynamic-pressure proxy; incandescent tint from thermal skin model.
         v = abs(float(model.vertical_speed_mps))
         q = float(model.atm_density_kg_m3) * (v * v)  # proxy
-        # Map to 0..1 over a reasonable range.
-        t = float(np.clip((q - 50_000.0) / 450_000.0, 0.0, 1.0))
-        # Slightly nonlinear so blackening happens mostly during stronger heating.
-        t = t * t
+        t_char = float(np.clip((q - 50_000.0) / 450_000.0, 0.0, 1.0))
+        t_char = t_char * t_char
         base = np.array([220, 205, 190], dtype=float)
         char = np.array([35, 30, 28], dtype=float)
-        c = (base * (1 - t) + char * t).astype(int)
+        c = base * (1 - t_char) + char * t_char
+        t_skin = float(model.heatshield_skin_temp_c)
+        inc = float(np.clip((t_skin - 380.0) / 920.0, 0.0, 1.0))
+        hot = np.array([255, 118, 55], dtype=float)
+        c = c * (1 - inc) + hot * inc
+        c = np.clip(c, 0, 255).astype(int)
         return int(c[0]), int(c[1]), int(c[2])
+
+    def _heatshield_glow_alpha(self, model: PhysicsModel) -> float:
+        """0..1 for additive glow around the shell (re-entry heating)."""
+        if model.heatshield_jettisoned:
+            return 0.0
+        t_skin = float(model.heatshield_skin_temp_c)
+        return float(np.clip((t_skin - 520.0) / 900.0, 0.0, 1.0))
 
     def _draw_probe(self, screen: pygame.Surface, rect: pygame.Rect, model: PhysicsModel) -> None:
         scale = self._probe_scale(model)
@@ -632,6 +642,23 @@ class Renderer:
             if not model.heatshield_jettisoned:
                 self._heatshield_rgb = self._heatshield_color(model)
                 shell_r = int(body_r * 1.28)
+                glow = self._heatshield_glow_alpha(model)
+                if glow > 0.04:
+                    for li in range(3):
+                        gr = int(shell_r + 3 + li * max(4, int(5 * scale)))
+                        alpha = int(sink_alpha * 0.35 * glow * (1.0 - 0.28 * li))
+                        if alpha < 4:
+                            continue
+                        box = 2 * gr + 4
+                        layer = pygame.Surface((box, box), pygame.SRCALPHA)
+                        ccx, ccy = box // 2, box // 2
+                        pygame.draw.circle(
+                            layer,
+                            (255, min(255, 120 + int(80 * glow)), 50, alpha),
+                            (ccx, ccy),
+                            gr,
+                        )
+                        tmp.blit(layer, (cx_t - ccx, cy_t - ccy), special_flags=pygame.BLEND_RGBA_ADD)
                 pygame.draw.circle(tmp, (*self._heatshield_rgb, sink_alpha), (cx_t, cy_t), shell_r)
                 pygame.draw.circle(tmp, (80, 75, 70, sink_alpha), (cx_t, cy_t), shell_r, width=2)
             pygame.draw.circle(tmp, (*inner_color, sink_alpha), (cx_t, cy_t), body_r)
@@ -645,6 +672,23 @@ class Renderer:
         if not model.heatshield_jettisoned:
             self._heatshield_rgb = self._heatshield_color(model)
             shell_r = int(body_r * 1.28)
+            glow = self._heatshield_glow_alpha(model)
+            if glow > 0.04:
+                for li in range(3):
+                    gr = int(shell_r + 3 + li * max(4, int(5 * scale)))
+                    alpha = int(55 * glow * (1.0 - 0.28 * li))
+                    if alpha < 6:
+                        continue
+                    box = 2 * gr + 4
+                    layer = pygame.Surface((box, box), pygame.SRCALPHA)
+                    cx, cy = box // 2, box // 2
+                    pygame.draw.circle(
+                        layer,
+                        (255, min(255, 120 + int(80 * glow)), 50, alpha),
+                        (cx, cy),
+                        gr,
+                    )
+                    screen.blit(layer, (x - cx, y - cy), special_flags=pygame.BLEND_RGBA_ADD)
             pygame.draw.circle(screen, self._heatshield_rgb, (x, y), shell_r)
             pygame.draw.circle(screen, (80, 75, 70), (x, y), shell_r, width=2)
 

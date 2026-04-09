@@ -47,13 +47,7 @@ def load_atmosphere_table(path: Path) -> Optional[AtmosphereTable]:
 
 
 def sample_atmosphere(h_m: float, body: BodyConfig, table: Optional[AtmosphereTable]) -> AtmosphereSample:
-    """
-    Atmosphere parameters at altitude.
-
-    Modes:
-    - table: interpolate tabulated profile
-    - fallback: exponential approximation if no table
-    """
+    """Atmosphere at altitude: interpolate `titan_atm.json` when loaded."""
 
     h = max(0.0, float(h_m))
 
@@ -63,11 +57,7 @@ def sample_atmosphere(h_m: float, body: BodyConfig, table: Optional[AtmosphereTa
         p_bar = float(np.interp(h, table.alt_m, table.p_bar))
         return AtmosphereSample(rho=rho, t_ext_c=t_ext_c, p_bar=p_bar)
 
-    # Fallback:
-    # rho(h) = rho0 * exp(-h/H)
     rho = float(body.rho_surface_kg_m3) * math.exp(-h / float(body.scale_height_m))
-
-    # Simple placeholders for temperature/pressure (replace with a richer model if needed).
     t_ext_c = -179.0 + 80.0 * math.exp(-h / 60_000.0)
     p_bar = 1.5 * math.exp(-h / 20_000.0)
 

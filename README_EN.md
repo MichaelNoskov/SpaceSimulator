@@ -33,11 +33,11 @@ Physics lives in `digital_twin`; Pygame handles the world and cockpit so you can
 | Area | Content |
 |------|---------|
 | **Gravity** | Constant acceleration at Titan’s surface |
-| **Atmosphere** | Profile from `data/titan_atm.json`; exponential height profile if the table is unavailable |
+| **Atmosphere** | Titan vertical profile in `data/titan_atm.json` (Huygens HASI L4, NASA PDS) |
 | **Gas state** | Bulk $\rho$, $T$, $P$ vs altitude in the equations of motion |
 | **Aerodynamics** | Quadratic drag; parachutes and heatshield jettison change $C_d$ and area |
-| **Wind** | Height-dependent; shifts air-relative velocity |
-| **Thermal** | Cabin / internal temperature model |
+| **Wind** | Huygens DWE zonal wind in `data/titan_wind_huygens.json` (NASA PDS); shifts air-relative velocity |
+| **Thermal** | **Skin**: reduced-order entry model — $\rho$–$|v_{\mathrm{rel}}|$ heating with a **rarefaction knee**, **pyrolysis blowing** (BL blockage), and **ablative cooling**; relaxes toward $T_{\mathrm{ext}}$; **bays** couple to the skin while the heatshield is on, else direct $q_{\mathrm{dyn}}$ heating |
 | **Scene** | Clouds and haze in the visualization |
 | **Propulsion** | Thrust and fuel consumption |
 | **Surface** | Procedural terrain, land and liquid regions |
@@ -224,7 +224,7 @@ A Huygens-like descent chain in the simulator’s terms.
 
 | # | Phase | What happens |
 |---|-------|----------------|
-| 1 | **Entry (`entry`)** | High speed; $\rho$ grows downward; strong aerobraking. **$\rho(h), T(h), P(h)$**; **wind** shifts $\mathbf{v}_{\mathrm{rel}}$ and $\mathbf{F}_d$. Visuals: sky gradient, haze, clouds; heatshield jettison can spawn particles. |
+| 1 | **Entry (`entry`)** | High speed; $\rho$ grows downward; strong aerobraking. **$\rho(h), T(h), P(h)$**; **Huygens DWE wind table** shifts $\mathbf{v}_{\mathrm{rel}}$ and $\mathbf{F}_d$. Heatshield: rarefaction, blowing, and ablation on top of a $\rho$–$|v|$ stagnation proxy. Visuals: sky gradient, haze, clouds; heatshield jettison can spawn particles. |
 | 2 | **Heatshield jettison** | After $M$ drops: lower mass; new $C_d$ and area. |
 | 3 | **Drogue (`drogue_chute`)** | Large $C_d$ and $A$ — strong deceleration in dense air. |
 | 4 | **Main + science hold (`science_descent` / `main_chute`)** | Even larger area and $C_d$; minimum time under canopy before jettison. |
@@ -257,9 +257,21 @@ A Huygens-like descent chain in the simulator’s terms.
 
 | File | Role |
 |------|------|
-| `data/titan_atm.json` | Atmosphere profile and metadata (including open-data URLs) |
+| `data/titan_atm.json` | Huygens HASI L4 atmosphere (P, T, ρ; entry segment: ideal-gas ρ from P and T). Source TAB: `data/nasa_pds/hasi_profiles/` |
+| `data/titan_wind_huygens.json` | Huygens DWE zonal wind (`ZONALWIND.TAB`). Above ~144 km the last measured zonal value is held to 1400 km for the scenario entry altitude |
+| `data/huygens_velocity_telemetry.json` | Huygens HASI L4 probe speed (`HASI_L4_VELOCITY_PROFILE.TAB`). Mission record; simulator state is integrated separately |
+| `data/nasa_pds/` | NASA/JPL/PDS archive: PDFs and TAB/LBL; see `data/nasa_pds/README_SOURCES.md` |
 | `data/surface_map.meta.json` | Metadata and references for the surface mask |
 | `LICENSE` | **MIT** |
+
+Catalog and document links (also in JSON metadata):
+
+- [PDS: HASI mission dataset](https://pds.nasa.gov/ds-view/pds/viewDataset.jsp?dsid=HP-SSA-HASI-2-3-4-MISSION-V1.1)
+- [PDS: DWE descent wind](https://pds.nasa.gov/ds-view/pds/viewDataset.jsp?dsid=HP-SSA-DWE-2-3-DESCENT-V1.0)
+- [PDS Atmospheres Node — HASI bundle](https://atmos.nmsu.edu/PDS/data/PDS4/Huygens/hphasi_bundle/)
+- [PDS Atmospheres Node — DWE bundle](https://atmos.nmsu.edu/PDS/data/PDS4/Huygens/hpdwe_bundle/)
+- [NASA Science — Cassini fact sheet (PDF)](https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/c/cassinifactsheet.pdf)
+- [JPL Descanso — Cassini telecom (PDF)](https://descanso.jpl.nasa.gov/DPSummary/Descanso3--Cassini.pdf)
 
 ---
 

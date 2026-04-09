@@ -41,7 +41,7 @@ Use the **right-hand hint list** in the editor; **Tab** completes after `sim.` o
 | `can_heatshield_jettison`, `can_drogue`, `can_main`, `can_chute_jettison` | Whether an action is allowed |
 | `fuel_kg` | Fuel mass, kg |
 | `g_load` | G-load |
-| `atm_pressure_bar`, `internal_temp_c` | Pressure, internal temperature |
+| `atm_pressure_bar`, `internal_temp_c`, `heatshield_skin_temp_c` | Pressure, bay temperature, heatshield skin temperature (until jettison) |
 | `distance_to_target_m` | Distance to map target, m |
 | `stat(key, default)` | Extra HUD-style keys (`h_km`, `v_vert`, `dist_m`, …) |
 

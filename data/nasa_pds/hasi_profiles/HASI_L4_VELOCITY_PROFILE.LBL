@@ -1,0 +1,77 @@
+PDS_VERSION_ID                     = PDS3
+
+/* FILE CHARACTERISTICS DATA ELEMENTS */
+RECORD_TYPE                        = FIXED_LENGTH
+RECORD_BYTES                       = 18
+FILE_RECORDS                       = 2941
+
+/* DATA OBJECT POINTER IDENTIFICATION ELEMENTS */
+^TABLE                             = "HASI_L4_VELOCITY_PROFILE.TAB"
+
+/* INSTRUMENT AND DETECTOR DESCRIPTIVE DATA ELEMENTS */
+FILE_NAME                          = "HASI_L4_VELOCITY_PROFILE.TAB"
+DATA_SET_ID                        = "HP-SSA-HASI-2-3-4-MISSION-V1.1"
+DATA_SET_NAME                      = "HUYGENS HASI MISSION RAW AND CALIBRATED DATA V1.1"
+PRODUCT_ID                         = "HASI_L4_VELOCITY_PROFILE"
+PRODUCT_NAME                       = "HASI_L4_VELOCITY_PROFILE.TAB"
+MISSION_NAME                       = "CASSINI-HUYGENS"
+INSTRUMENT_HOST_NAME               = "HUYGENS PROBE"
+INSTRUMENT_HOST_ID                 = HP
+MISSION_PHASE_NAME                 = {"ENTRY","DESCENT"}
+PRODUCT_TYPE                       = EDR
+START_TIME                         = 2005-01-14T09:05:00.228
+STOP_TIME                          = 2005-01-14T11:38:15.137
+SPACECRAFT_CLOCK_START_COUNT       = "-04:23:27.275"    /* DDB time in HH:MM:SS.MS  ('-' for preT0) */
+SPACECRAFT_CLOCK_STOP_COUNT        = " 02:27:40.267"
+NATIVE_START_TIME                  =    -320600    /* Elapsed time from T0 in milliseconds ('-' for preT0) */
+NATIVE_STOP_TIME                   =    8860267
+PRODUCT_CREATION_TIME              = 2006-08-31T15:35:10.000
+
+PRODUCER_ID                        = "HASI_TEAM"
+PRODUCER_FULL_NAME                 = "ABOUDAN ALESSIO"
+PRODUCER_INSTITUTION_NAME          = "CISAS-UPD"
+TARGET_NAME                        = "TITAN"
+
+/* INSTRUMENT DESCRIPTION */
+INSTRUMENT_ID                      = "HASI"
+INSTRUMENT_NAME                    = "HUYGENS ATMOSPHERIC STRUCTURE INSTRUMENT"
+INSTRUMENT_TYPE                    = {"ACCELEROMETER", "THERMOMETER", "BAROMETER"}
+
+DATA_QUALITY_ID                    = 1
+DATA_QUALITY_DESC                  = "1 = high quality ... 5 = low quality"
+
+INSTRUMENT_MODE_ID                 = {"ENTRY","DESCENT"}
+
+/* DATA OBJECT DEFINITION */
+OBJECT                             = TABLE
+ INTERCHANGE_FORMAT                = ASCII
+ ROWS                              = 2941
+ COLUMNS                           = 2
+ ROW_BYTES                         = 18
+ DESCRIPTION                       = "Probe trajectory vertical velocity profile"
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 1
+  NAME                            = "Time"
+  UNIT                            = "Milliseconds"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 1
+  BYTES                           = 8
+  FORMAT                          = "I8"
+  DESCRIPTION                     = "NULL"
+ END_OBJECT                       = COLUMN
+
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 2
+  NAME                            = "Velocity"
+  UNIT                            = "m/s"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 10
+  BYTES                           = 7
+  FORMAT                          = "F7.2"
+  DESCRIPTION                     = "NULL"
+ END_OBJECT                       = COLUMN
+
+END_OBJECT                         = TABLE
+END

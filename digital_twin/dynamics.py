@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .config import DigitalTwinConfig
+from .config import DigitalTwinConfig, HeatshieldThermalConfig
 from .state import AtmosphereSample, SimState
 
 
@@ -262,10 +262,75 @@ def integrate_semi_implicit_euler(s: SimState, a: Accels, dt_s: float) -> None:
     s.z_m += float(s.v_z_mps) * dt
 
 
-def thermal_relaxation_step(cfg: DigitalTwinConfig, s: SimState, t_ext_c: float, q_dyn_pa: float, dt_s: float) -> None:
+def heatshield_skin_dTdt(
+    t_skin_c: float,
+    t_ext_c: float,
+    rho_kg_m3: float,
+    v_rel_mag_mps: float,
+    cfg: HeatshieldThermalConfig,
+) -> float:
+    """Time derivative of heatshield skin temperature [°C/s] (explicit thermal ODE right-hand side)."""
+    rho = max(0.0, float(rho_kg_m3))
+    vm = max(0.0, float(v_rel_mag_mps))
+    f_gas = max(0.0, float(cfg.titan_gas_heating_factor))
+    kf = float(cfg.k_friction_rho_v3)
+    rho_exp = float(cfg.rho_exponent)
+    v_exp = float(cfg.v_exponent)
+    knee = max(1e-18, float(cfg.rho_knee_kg_m3))
+    f_rare = rho / (rho + knee)
+    q_base = kf * (rho**rho_exp) * (vm**v_exp) * f_gas * f_rare
+
+    t = float(t_skin_c)
+    t_ref = float(cfg.t_pyrolysis_ref_c)
+    kb = float(cfg.k_blowing)
+    p_bl = float(cfg.blowing_exponent)
+    bcap = float(cfg.blowing_max_fraction)
+    mdot_proxy = math.sqrt(rho * vm + 1e-30) * (max(0.0, t - t_ref) ** p_bl)
+    blow = min(max(0.0, bcap), kb * mdot_proxy)
+    q_conv = q_base * (1.0 - blow)
+
+    ta = float(cfg.t_ablation_onset_c)
+    k_abl = float(cfg.k_ablation_cooling)
+    p_abl = float(cfg.ablation_exponent)
+    q_abl = k_abl * (max(0.0, t - ta) ** p_abl) * math.sqrt(rho + 1e-30) * vm
+
+    ka = float(cfg.k_ambient_1ps)
+    t_ext = float(t_ext_c)
+    return q_conv - q_abl - ka * (t - t_ext)
+
+
+def heatshield_skin_step(
+    t_skin_c: float,
+    t_ext_c: float,
+    rho_kg_m3: float,
+    v_rel_mag_mps: float,
+    dt_s: float,
+    cfg: HeatshieldThermalConfig,
+) -> float:
+    """Advance heatshield skin temperature [°C] one explicit Euler step."""
+    dt = float(dt_s)
+    if dt <= 0.0:
+        return float(t_skin_c)
+    dTdt = heatshield_skin_dTdt(t_skin_c, t_ext_c, rho_kg_m3, v_rel_mag_mps, cfg)
+    t_new = float(t_skin_c) + dTdt * dt
+    return float(np.clip(t_new, float(cfg.t_min_c), float(cfg.t_max_c)))
+
+
+def thermal_relaxation_step(
+    cfg: DigitalTwinConfig,
+    s: SimState,
+    t_ext_c: float,
+    q_dyn_pa: float,
+    dt_s: float,
+    *,
+    t_skin_c: float,
+    heatshield_attached: bool,
+) -> None:
     """
-    Simplified thermal model:
-      dT_int/dt = k_relax*(T_ext - T_int) + (RTG / C) + k_qdyn*q_dyn
+    Internal bay temperature:
+      dT_int/dt = k_relax*(T_ext - T_int) + RTG/C
+                  + [if heatshield: k_couple*(T_skin - T_int)]
+                  + [if not heatshield: k_qdyn*q_dyn]
     """
 
     dt = float(dt_s)
@@ -279,7 +344,12 @@ def thermal_relaxation_step(cfg: DigitalTwinConfig, s: SimState, t_ext_c: float,
     rtg_w = float(cfg.thermal.rtg_w)
     heat_cap = max(1.0, float(cfg.thermal.heat_capacity_j_per_c))
     k_qdyn = float(cfg.thermal.k_qdyn_c_per_s_per_pa)
+    k_couple = float(cfg.thermal.k_heatshield_coupling_1ps)
 
-    dTdt = k_relax * (t_ext - t_int) + (rtg_w / heat_cap) + k_qdyn * float(q_dyn_pa)
+    dTdt = k_relax * (t_ext - t_int) + (rtg_w / heat_cap)
+    if heatshield_attached:
+        dTdt += k_couple * (float(t_skin_c) - t_int)
+    else:
+        dTdt += k_qdyn * float(q_dyn_pa)
     s.t_int_c = t_int + dTdt * dt
 

@@ -16,6 +16,8 @@ from .dynamics import (
     aero_params_for_state,
     drag_force_vector_n,
     fuel_burn_kg,
+    heatshield_skin_dTdt,
+    heatshield_skin_step,
     thermal_relaxation_step,
 )
 from .models.atmosphere import AtmosphereTable, load_atmosphere_table, sample_atmosphere
@@ -63,11 +65,10 @@ class PhysicsModel:
         self._telemetry_history: Deque[dict[str, float]] = deque(maxlen=15000)
         # (sim_time_s, tag_id, detail) — successful commands for mission plots (auto + manual).
         self._plot_action_log: Deque[Tuple[float, str, str]] = deque(maxlen=12000)
-        self._reset_state()
-        self._target = self._make_target_at(0.0, 0.0)
-
         self._tick_id = 0
         self._cache: dict[str, tuple[int, object]] = {}
+        self._reset_state()
+        self._target = self._make_target_at(0.0, 0.0)
         self._csv_file: Optional[TextIO] = None
         self._csv_writer: Optional[Any] = None
         self._csv_log_path: Optional[str] = None
@@ -122,6 +123,19 @@ class PhysicsModel:
 
         # Internal bay temperature [°C]; fail limits (Tmin/Tmax) and HUD.
         self._internal_temp_c = -20.0
+
+        # Heatshield skin [°C]: start at free-stream + stagnation/friction offset (not a fixed cold soak
+        # below T_ext — that was wrong once the probe is already in the atmosphere at high speed).
+        self._invalidate_cache()
+        hcfg = self._cfg.heatshield_thermal
+        t_ext0 = float(self.atm_temp_ext_c)
+        rho0 = float(self.atm_density_kg_m3)
+        v0 = max(0.0, float(self.air_rel_speed_mps))
+        dT0 = heatshield_skin_dTdt(t_ext0, t_ext0, rho0, v0, hcfg)
+        delta_stag = float(dT0) / max(1e-12, float(hcfg.k_ambient_1ps))
+        self._heatshield_skin_temp_c = float(
+            np.clip(t_ext0 + delta_stag, float(hcfg.t_min_c), float(hcfg.t_max_c))
+        )
 
         # Outcome: `failed` means a fault was recorded; `result` is final (success/failure).
         self._result = SimResult.RUNNING
@@ -292,6 +306,7 @@ class PhysicsModel:
                     "result",
                     "g_load",
                     "pressure_bar",
+                    "heatshield_skin_c",
                 ]
             )
             self._csv_file = f
@@ -323,6 +338,7 @@ class PhysicsModel:
                 self.result.value,
                 f"{self.g_load:.4f}",
                 f"{self.atm_pressure_bar:.6f}",
+                f"{self.heatshield_skin_temp_c:.3f}",
             ]
         )
 
@@ -467,6 +483,11 @@ class PhysicsModel:
     def internal_temp_c(self, value: float) -> None:
         self._internal_temp_c = float(value)
         self._invalidate_cache()
+
+    @property
+    def heatshield_skin_temp_c(self) -> float:
+        """Ablator / outer skin temperature while heatshield is on; frozen after jettison."""
+        return float(self._heatshield_skin_temp_c)
 
     @property
     def result(self) -> SimResult:
@@ -870,13 +891,25 @@ class PhysicsModel:
                 self._throttle_0_1 = 0.0
                 self._engine_on = False
 
-        # thermal
+        # thermal: skin first (friction + equilibration to T_ext), then bays (coupled to skin while shield on)
+        hs_on = not self._heatshield_jettisoned
+        if hs_on:
+            self._heatshield_skin_temp_c = heatshield_skin_step(
+                float(self._heatshield_skin_temp_c),
+                float(self.atm_temp_ext_c),
+                float(self.atm_density_kg_m3),
+                float(self.air_rel_speed_mps),
+                dt,
+                self._cfg.heatshield_thermal,
+            )
         thermal_relaxation_step(
             self._cfg,
             _ThermalStateProxy(self),
             t_ext_c=float(self.atm_temp_ext_c),
             q_dyn_pa=float(self.dynamic_pressure_pa),
             dt_s=dt,
+            t_skin_c=float(self._heatshield_skin_temp_c),
+            heatshield_attached=hs_on,
         )
 
         self._time_s = float(self.time_s + dt)

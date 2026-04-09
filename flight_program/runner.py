@@ -39,6 +39,7 @@ SIM_API_COMPLETIONS: tuple[str, ...] = (
     "sim.fuel_kg",
     "sim.g_load",
     "sim.heatshield_jettisoned",
+    "sim.heatshield_skin_temp_c",
     "sim.horizontal_speed_mps",
     "sim.internal_temp_c",
     "sim.main_deployed",
@@ -163,6 +164,10 @@ class SimView:
     @property
     def heatshield_jettisoned(self) -> bool:
         return bool(self._m.heatshield_jettisoned)
+
+    @property
+    def heatshield_skin_temp_c(self) -> float:
+        return float(self._m.heatshield_skin_temp_c)
 
     @property
     def drogue_deployed(self) -> bool:

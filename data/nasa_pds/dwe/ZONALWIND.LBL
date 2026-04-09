@@ -1,0 +1,109 @@
+PDS_VERSION_ID                 = PDS3
+
+/* FILE CHARACTERISTICS DATA ELEMENTS */
+
+RECORD_TYPE                    = FIXED_LENGTH
+RECORD_BYTES                   = 85
+FILE_RECORDS                   = 2915
+
+/* DATA OBJECT POINTER IDENTIFICATION ELEMENTS */
+
+^TABLE                         = "ZONALWIND.TAB"
+
+/* INSTRUMENT AND DETECTOR DESCRIPTIVE DATA ELEMENTS */
+
+FILE_NAME                      = "ZONALWIND.TAB"
+DATA_SET_ID                    = "HP-SSA-DWE-2-3-DESCENT-V1.0"
+DATA_SET_NAME                  = "HUYGENS PROBE DWE RESULTS V1.0"
+PRODUCT_ID                     = "ZONALWIND.TAB"
+PRODUCT_NAME                   = "DWE TITAN ZONAL WIND PROFILE"
+MISSION_NAME                   = "CASSINI-HUYGENS"
+INSTRUMENT_HOST_NAME           = "HUYGENS PROBE"
+INSTRUMENT_HOST_ID             = HP
+MISSION_PHASE_NAME             = "DESCENT"
+PRODUCT_TYPE                   = RDR
+START_TIME                     = 2005-01-14T09:12:20.596
+STOP_TIME                      = 2005-01-14T14:45:40.188
+SPACECRAFT_CLOCK_START_COUNT   = NULL
+SPACECRAFT_CLOCK_STOP_COUNT    = NULL
+NATIVE_START_TIME              = NULL /* Elapsed time, from To */
+NATIVE_STOP_TIME               = NULL
+PRODUCT_CREATION_TIME          = 2006-05-05T12:00:00
+PRODUCER_ID                    = DWE_ROBIN
+PRODUCER_FULL_NAME             = "ROBINDRO DUTTA-ROY"
+PRODUCER_INSTITUTION_NAME      = "UNIVERSITY BONN"
+TARGET_NAME                    = "TITAN"
+
+/* INSTRUMENT DESCRIPTION */
+
+INSTRUMENT_ID                  = DWE
+INSTRUMENT_NAME                = "DOPPLER WIND EXPERIMENT"
+INSTRUMENT_TYPE                = "RADIO SCIENCE"
+
+/* IF NECESSARY */
+
+DATA_QUALITY_ID                = 1
+DATA_QUALITY_DESC              = "HIGH"
+
+/* DATA OBJECT DEFINITION */
+
+OBJECT                         = TABLE
+ INTERCHANGE_FORMAT            = ASCII
+ ROWS                          = 2915
+ COLUMNS                       = 4
+ ROW_BYTES                     = 85  /* incl. CR/LF */
+ DESCRIPTION                   = "This table lists the final DWE result"
+
+ OBJECT                        = COLUMN
+     COLUMN_NUMBER             = 1
+     NAME                      = "SPACECRAFT EVENT TIME (UTC)"
+     UNIT                      = "N/A"
+     DATA_TYPE                 = TIME
+     START_BYTE                = 1
+     BYTES                     = 23
+     FORMAT                    = "A23"
+     DESCRIPTION               = "Huygens local time, reconstructed from Earth
+                                  Received Time of the corresponding DWE 
+                                  Doppler sample and the one-way light time
+                                  between the receiving antenna and Titan"
+ END_OBJECT                    = COLUMN
+
+ OBJECT                        = COLUMN
+     COLUMN_NUMBER             = 2
+     NAME                      = "HUYGENS ALTITUDE"
+     UNIT                      = "KM"
+     DATA_TYPE                 = ASCII_REAL
+     START_BYTE                = 24
+     BYTES                     = 20
+     FORMAT                    = "F20.5"
+     DESCRIPTION               = "Huygens altitude above Titan's surface 
+                                 (source DTWG, altitude is defined as radial 
+                                 distance from center of Titan - 2575 km)"
+ END_OBJECT                    = COLUMN
+
+ OBJECT                        = COLUMN
+     COLUMN_NUMBER             = 3
+     NAME                      = "ZONAL WIND SPEED"
+     UNIT                      = "M/S"
+     DATA_TYPE                 = ASCII_REAL
+     START_BYTE                = 44
+     BYTES                     = 20
+     FORMAT                    = "F20.5"
+     DESCRIPTION               = "Huygens zonal speed (positive = eastward)"
+ END_OBJECT                    = COLUMN
+
+ OBJECT                        = COLUMN
+     COLUMN_NUMBER             = 4
+     NAME                      = "ZONAL WIND SPEED ERROR"
+     UNIT                      = "M/S"
+     DATA_TYPE                 = ASCII_REAL
+     START_BYTE                = 64
+     BYTES                     = 20
+     FORMAT                    = "F20.5"
+     DESCRIPTION               = "Possible systematic error of zonal speed 
+                                  due to initial Huygens delivery error"
+ END_OBJECT                    = COLUMN
+
+END_OBJECT                     = TABLE
+
+END

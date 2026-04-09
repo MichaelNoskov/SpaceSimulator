@@ -1,0 +1,101 @@
+PDS_VERSION_ID                     = PDS3
+
+/* FILE CHARACTERISTICS DATA ELEMENTS */
+RECORD_TYPE                        = FIXED_LENGTH
+RECORD_BYTES                       = 49
+FILE_RECORDS                       = 911
+
+/* DATA OBJECT POINTER IDENTIFICATION ELEMENTS */
+^TABLE                             = "HASI_L4_ATMO_PROFILE_ENTRY.TAB"
+
+/* INSTRUMENT AND DETECTOR DESCRIPTIVE DATA ELEMENTS */
+FILE_NAME                          = "HASI_L4_ATMO_PROFILE_ENTRY.TAB"
+DATA_SET_ID                        = "HP-SSA-HASI-2-3-4-MISSION-V1.1"
+DATA_SET_NAME                      = "HUYGENS HASI MISSION RAW AND CALIBRATED DATA V1.1"
+PRODUCT_ID                         = "HASI_L4_ATMO_PROFILE_ENTRY"
+PRODUCT_NAME                       = "HASI_L4_ATMO_PROFILE_ENTRY.TAB"
+MISSION_NAME                       = "CASSINI-HUYGENS"
+INSTRUMENT_HOST_NAME               = "HUYGENS PROBE"
+INSTRUMENT_HOST_ID                 = HP
+MISSION_PHASE_NAME                 = "ENTRY"
+PRODUCT_TYPE                       = EDR
+START_TIME                         = 2005-01-14T09:05:28.878
+STOP_TIME                          = 2005-01-14T09:10:20.188
+SPACECRAFT_CLOCK_START_COUNT       = "-04:23:55.925"    /* DDB time in HH:MM:SS.MS  ('-' for preT0) */
+SPACECRAFT_CLOCK_STOP_COUNT        = "-04:28:47.235"
+NATIVE_START_TIME                  =    -291950    /* Elapsed time from T0 in milliseconds ('-' for preT0) */
+NATIVE_STOP_TIME                   =       -640
+PRODUCT_CREATION_TIME              = 2006-08-31T15:35:05.000
+
+PRODUCER_ID                        = "HASI_TEAM"
+PRODUCER_FULL_NAME                 = "ABOUDAN ALESSIO"
+PRODUCER_INSTITUTION_NAME          = "CISAS-UPD"
+TARGET_NAME                        = "TITAN"
+
+/* INSTRUMENT DESCRIPTION */
+INSTRUMENT_ID                      = "HASI"
+INSTRUMENT_NAME                    = "HUYGENS ATMOSPHERIC STRUCTURE INSTRUMENT"
+INSTRUMENT_TYPE                    = "ACCELEROMETER"
+
+DATA_QUALITY_ID                    = 1
+DATA_QUALITY_DESC                  = "1 = high quality ... 5 = low quality"
+
+INSTRUMENT_MODE_ID                 = "ENTRY"
+
+/* DATA OBJECT DEFINITION */
+OBJECT                             = TABLE
+ INTERCHANGE_FORMAT                = ASCII
+ ROWS                              = 911
+ COLUMNS                           = 4
+ ROW_BYTES                         = 49
+ DESCRIPTION                       = "Atmospheric vertical profile of pressure, temperature and density during entry"
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 1
+  NAME                            = "Time"
+  UNIT                            = "Milliseconds"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 1
+  BYTES                           = 8
+  FORMAT                          = "I8"
+  DESCRIPTION                     = "NULL"
+ END_OBJECT                       = COLUMN
+
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 2
+  NAME                            = "Altitude"
+  UNIT                            = "m"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 10
+  BYTES                           = 9
+  FORMAT                          = "F9.1"
+  DESCRIPTION                     = "NULL"
+ END_OBJECT                       = COLUMN
+
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 3
+  NAME                            = "Pressure"
+  UNIT                            = "Pa"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 20
+  BYTES                           = 17
+  FORMAT                          = "F17.13"
+  DESCRIPTION                     = "NULL"
+ END_OBJECT                       = COLUMN
+
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 4
+  NAME                            = "Temperature"
+  UNIT                            = "K"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 38
+  BYTES                           = 9
+  FORMAT                          = "F9.4"
+  DESCRIPTION                     = "NULL"
+ END_OBJECT                       = COLUMN
+
+END_OBJECT                         = TABLE
+END
