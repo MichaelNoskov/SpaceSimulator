@@ -153,9 +153,10 @@ class Renderer:
         self._draw_event_frags(screen, ui_rect, model)
         self._draw_effects(screen, ui_rect, model, frame_dt)
         if controller is not None:
-            ui.draw_overlay(screen, controller)  # type: ignore[arg-type]
+            ui._draw_overlay_hud(screen, controller)  # type: ignore[arg-type]
         self.draw_minimap(screen, model, ui.map_rect)
         if controller is not None:
+            ui._draw_modal_overlays(screen, controller)  # type: ignore[arg-type]
             ui.draw_mission_report_modal(screen, controller)  # type: ignore[arg-type]
             ui.draw_pause_control(screen)  # type: ignore[arg-type]
         pygame.display.flip()

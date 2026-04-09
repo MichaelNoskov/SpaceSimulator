@@ -12,6 +12,8 @@
 | [Installing](#installing-python-and-the-project) | Python, venv, dependencies |
 | [Run](#run) | `main.py` and standalone binaries |
 | [Controls](#controls-using-the-simulator) | Console, keys, CSV |
+| [Flight program (EN)](FLIGHT_PROGRAM_EN.md) | Autopilot script (`tick(sim, ap)`) |
+| [Программа полёта (RU)](FLIGHT_PROGRAM_RU.md) | Same document in Russian |
 | [Key formulas](#key-formulas) | Thrust, Mach, drag, atmosphere |
 | [Landing phases](#landing-phases) | Descent timeline |
 | [Code map](#code-map) | Project layout |
@@ -128,12 +130,16 @@ The UI is an **operator console**: instruments show the flight state; levers and
 
 | Mode | Behavior |
 |------|----------|
-| **Auto** | Typical sequence: heatshield, chutes, jettison, engine near the surface with simple descent-rate assist |
+| **Auto** | Sequence from the editable **flight program** (`tick(sim, ap)`); default matches the classic heatshield → chutes → engine assist |
 | **Manual** | You drive every decision — good for experiments and learning |
 
 ### Pause menu
 
-**Pause** (top right), **Esc**, or **Space** open the menu: resume, auto/manual, **RU/EN**, restart, **CSV** logging, quit.
+**Pause** (top right), **Esc**, or **Space** open the menu: resume, auto/manual, **RU/EN**, restart, **CSV** logging, **flight program** editor, quit.
+
+### Flight program (Auto mode)
+
+**Auto** is driven by a restricted Python script edited from the pause menu (**Flight program**): API hints, syntax highlighting, and a dry-run **`tick()`** check on save. Full reference — **[FLIGHT_PROGRAM_EN.md](FLIGHT_PROGRAM_EN.md)**; in Russian — **[FLIGHT_PROGRAM_RU.md](FLIGHT_PROGRAM_RU.md)**.
 
 ### Keyboard shortcuts
 
@@ -241,6 +247,7 @@ A Huygens-like descent chain in the simulator’s terms.
 | `digital_twin/models/wind.py` | Wind vs altitude |
 | `digital_twin/world.py` | Terrain and surface type |
 | `control/` | UI commands → model |
+| `flight_program/` | Autopilot script: `runner.py` (API, validation), `highlighter.py` (editor colors) |
 | `ui.py` | Instruments, levers, i18n, post-landing plots |
 | `render.py` | World draw order, minimap |
 

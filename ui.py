@@ -3,13 +3,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, NamedTuple, Optional
 
+import math
+import re
+
 import numpy as np
 import pygame
-import math
 
 from control.commands import Command
 from control.controller import Controller
 from digital_twin.model import SimResult
+from flight_program import (
+    AP_API_COMPLETIONS,
+    DEFAULT_SCRIPT,
+    FlightProgramRunner,
+    SIM_API_COMPLETIONS,
+    compile_flight_program,
+    validate_flight_program_tick,
+)
+from flight_program.highlighter import iter_flight_program_tokens
 
 
 I18N = {
@@ -52,14 +63,27 @@ I18N = {
         "help_body": (
             "Клик по мини-карте — выбор точки посадки.\n"
             "Рычаги: зелёный индикатор — можно включить.\n"
-            "Авто: последовательность парашютов и снижение у поверхности.\n"
-            "Esc / Пробел — меню паузы (продолжить, авто/ручной, язык, рестарт, CSV, выход). R — рестарт, A — авто/ручной, F1 — эта справка.\n"
+            "Авто: логика из пункта меню «Программирование полёта» (Python, функция tick(sim, ap)).\n"
+            "Esc / Пробел — меню паузы (продолжить, авто/ручной, язык, рестарт, CSV, программа полёта, выход). R — рестарт, A — авто/ручной, F1 — эта справка.\n"
             "+/− — скорость времени, F11 — полный экран.\n"
             "После завершения полёта — «Досье миссии»: чертежи телеметрии и синтетический снимок площадки."
         ),
         "esc_resume": "Продолжить",
         "esc_quit": "Выйти",
+        "esc_flight_program": "Программирование полёта",
         "esc_title": "Меню",
+        "fp_title": "Программа автопилота",
+        "fp_save": "Сохранить",
+        "fp_cancel": "Отменить",
+        "fp_reset_default": "К шаблону",
+        "fp_hint": "Определите tick(sim, ap). sim — показания, ap — команды (см. подсказку в коде).",
+        "fp_compile_error": "Ошибка программы",
+        "fp_runtime_error": "Ошибка в полёте, авто выкл.",
+        "fp_validate_error": "Проверка tick()",
+        "fp_hints_title": "Подсказки API",
+        "fp_header_sim": "sim (чтение)",
+        "fp_header_ap": "ap (команды)",
+        "fp_doc_ref": "См. FLIGHT_PROGRAM_RU.md",
         "post_landing_plots": "Телеметрия полёта",
         "plot_h_km": "Высота, км",
         "plot_v_vert": "Верт. скорость, м/с",
@@ -112,14 +136,27 @@ I18N = {
         "help_body": (
             "Click the minimap to set a landing target.\n"
             "Levers: green lamp means the action is allowed.\n"
-            "Auto: chute sequence and descent rate near the surface.\n"
-            "Esc / Space — pause menu (resume, auto/manual, lang, restart, CSV, quit). R — restart, A — auto/manual, F1 — this help.\n"
+            "Auto: logic from pause menu «Flight program» (Python, tick(sim, ap)).\n"
+            "Esc / Space — pause menu (resume, auto/manual, lang, restart, CSV, flight program, quit). R — restart, A — auto/manual, F1 — this help.\n"
             "+/− — time speed, F11 — fullscreen.\n"
             "After landing, open «Mission dossier» for telemetry drawings and a synthetic site snapshot."
         ),
         "esc_resume": "Resume",
         "esc_quit": "Quit",
+        "esc_flight_program": "Flight program",
         "esc_title": "Menu",
+        "fp_title": "Autopilot program",
+        "fp_save": "Save",
+        "fp_cancel": "Cancel",
+        "fp_reset_default": "Default",
+        "fp_hint": "Define tick(sim, ap). sim reads instruments; ap sends commands.",
+        "fp_compile_error": "Program error",
+        "fp_runtime_error": "Runtime error, auto off.",
+        "fp_validate_error": "tick() check failed",
+        "fp_hints_title": "API hints",
+        "fp_header_sim": "sim (read)",
+        "fp_header_ap": "ap (actions)",
+        "fp_doc_ref": "See FLIGHT_PROGRAM_EN.md",
         "post_landing_plots": "Flight telemetry",
         "plot_h_km": "Altitude, km",
         "plot_v_vert": "Vertical speed, m/s",
@@ -296,6 +333,27 @@ def slider_to_time_scale(v01: float) -> float:
     return float(10.0**exp)
 
 
+_FP_SYNTAX_COLORS: dict[str, tuple[int, int, int]] = {
+    "keyword": (188, 140, 230),
+    "string": (130, 200, 150),
+    "comment": (110, 115, 125),
+    "number": (240, 175, 100),
+    "api_root": (110, 200, 235),
+    "name": (218, 220, 228),
+    "op": (200, 205, 215),
+    "ws": (218, 220, 228),
+}
+
+
+class _FlightProgramEditorGeom(NamedTuple):
+    panel: pygame.Rect
+    text_area: pygame.Rect
+    hint_panel: pygame.Rect
+    default_btn: pygame.Rect
+    save_btn: pygame.Rect
+    cancel_btn: pygame.Rect
+
+
 class UI:
     def __init__(self, rect: pygame.Rect):
         self.rect = rect
@@ -307,6 +365,7 @@ class UI:
         self.font_small = pygame.font.SysFont("DejaVu Sans", int(14 * self.ui_scale))
         self.font_big = pygame.font.SysFont("DejaVu Sans", int(28 * self.ui_scale), bold=True)
         self.font_mono = pygame.font.SysFont("DejaVu Sans Mono", int(22 * self.ui_scale), bold=True)
+        self._fp_font = pygame.font.SysFont("DejaVu Sans Mono", int(15 * self.ui_scale))
 
         self._restart_requested = False
 
@@ -316,10 +375,12 @@ class UI:
         self.sim_paused: bool = False
         self.show_help: bool = False
         self.esc_menu_open: bool = False
+        self.flight_program_editor_open: bool = False
         self.mission_report_open: bool = False
         self._quit_requested: bool = False
         self._toast_until_ms: int = 0
         self._toast_key: str = "lever_denied"
+        self._toast_custom: Optional[str] = None
         self.stats = {}
         # Set by main; used by renderer-less overlay calls.
         self.controller: Optional[Controller] = None
@@ -486,6 +547,23 @@ class UI:
             self.engine_toggle_rect.x -= dx
             self.throttle_slider.rect.x -= dx
 
+        self.flight_program_source_saved: str = DEFAULT_SCRIPT
+        tick0, _e0, g0 = compile_flight_program(DEFAULT_SCRIPT)
+        self.flight_program_tick: Optional[Callable[..., None]] = tick0
+        self.flight_program_globals: Optional[dict] = g0
+        self.flight_program_sleep_until_s: Optional[float] = None
+        self._fp_lines: list[str] = [""]
+        self._fp_cy: int = 0
+        self._fp_cx: int = 0
+        self._fp_scroll: int = 0
+        self._fp_compile_error: Optional[str] = None
+        self._fp_text_input_started: bool = False
+        self._fp_hint_scroll: int = 0
+        self._fp_sel_mark: Optional[tuple[int, int]] = None
+        self._fp_drag_mark: Optional[tuple[int, int]] = None
+        self._fp_drag_selecting: bool = False
+        self._fp_internal_clipboard: str = ""
+
     def t(self, key: str) -> str:
         return I18N[self.lang][key]
 
@@ -522,13 +600,22 @@ class UI:
         """New flight from the start, unpaused (menu closes)."""
         self._restart_requested = True
         self.esc_menu_open = False
+        self.flight_program_editor_open = False
+        self._fp_stop_text_input()
         self.mission_report_open = False
+        self.flight_program_sleep_until_s = None
 
     def handle_keydown(self, event: pygame.event.Event, c: Controller) -> bool:
         if event.type != pygame.KEYDOWN:
             return False
-        key = event.key
-        if key == pygame.K_ESCAPE:
+        sc = event.scancode
+        if self.flight_program_editor_open:
+            if sc == pygame.KSCAN_ESCAPE:
+                self._flight_program_cancel()
+                return True
+            self._flight_program_handle_keydown(event, c)
+            return True
+        if sc == pygame.KSCAN_ESCAPE:
             if self.show_help:
                 self.show_help = False
                 return True
@@ -537,25 +624,25 @@ class UI:
                 return True
             self._toggle_esc_menu()
             return True
-        if key == pygame.K_F1:
+        if sc == pygame.KSCAN_F1:
             self.show_help = not self.show_help
             return True
-        if key in (pygame.K_SPACE, pygame.K_PAUSE):
+        if sc in (pygame.KSCAN_SPACE, pygame.KSCAN_PAUSE):
             if self.mission_report_open:
                 self.mission_report_open = False
                 return True
             self._toggle_esc_menu()
             return True
-        if key == pygame.K_r:
+        if sc == pygame.KSCAN_R:
             self._request_restart()
             return True
-        if key == pygame.K_a:
+        if sc == pygame.KSCAN_A:
             self.auto_mode = not self.auto_mode
             return True
-        if key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+        if sc in (pygame.KSCAN_EQUALS, pygame.KSCAN_KP_PLUS, pygame.KSCAN_KP_EQUALS):
             self.bump_time_slider(1)
             return True
-        if key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+        if sc in (pygame.KSCAN_MINUS, pygame.KSCAN_KP_MINUS):
             self.bump_time_slider(-1)
             return True
         return False
@@ -567,12 +654,12 @@ class UI:
 
     def _esc_menu_layout_full(
         self,
-    ) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect]:
-        """Order: resume, auto/manual, language, restart, CSV, quit."""
+    ) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect]:
+        """Order: resume, auto/manual, language, restart, CSV, flight program, quit."""
         cx = self.visual_rect.centerx
         bw, bh = int(240 * self.ui_scale), int(44 * self.ui_scale)
         gap = int(10 * self.ui_scale)
-        n = 6
+        n = 7
         total_h = n * bh + (n - 1) * gap
         y0 = self.visual_rect.centery - total_h // 2 + int(28 * self.ui_scale)
         rects: list[pygame.Rect] = []
@@ -581,15 +668,82 @@ class UI:
             r.centerx = cx
             r.top = y0 + i * (bh + gap)
             rects.append(r)
-        return (rects[0], rects[1], rects[2], rects[3], rects[4], rects[5])
+        return (rects[0], rects[1], rects[2], rects[3], rects[4], rects[5], rects[6])
 
     def handle_event(self, event: pygame.event.Event, c: Controller) -> None:
+        if self.flight_program_editor_open:
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                if self._fp_sel_mark is not None and (self._fp_cy, self._fp_cx) == self._fp_sel_mark:
+                    self._fp_sel_mark = None
+                self._fp_drag_selecting = False
+                self._fp_drag_mark = None
+            if event.type == pygame.TEXTINPUT:
+                if pygame.key.get_mods() & (pygame.KMOD_CTRL | pygame.KMOD_META):
+                    return
+                self._flight_program_insert_text(event.text)
+                return
+            if event.type == pygame.MOUSEMOTION:
+                if self._fp_drag_selecting and event.buttons[0]:
+                    g = self._flight_program_editor_geometry()
+                    ta = g.text_area
+                    p = self._fp_clamp_pos_to_text_area(event.pos, ta)
+                    self._flight_program_cursor_from_click(p, ta)
+                    if self._fp_drag_mark is not None and (self._fp_cy, self._fp_cx) != self._fp_drag_mark:
+                        self._fp_sel_mark = self._fp_drag_mark
+                return
+            if event.type == pygame.MOUSEWHEEL:
+                g = self._flight_program_editor_geometry()
+                mp = pygame.mouse.get_pos()
+                lh = self._fp_line_height()
+                hint_lh = self._fp_hint_row_height()
+                dy = int(getattr(event, "y", 0))
+                if g.hint_panel.collidepoint(mp):
+                    mx = self._fp_hint_max_scroll(g.hint_panel)
+                    self._fp_hint_scroll = int(np.clip(self._fp_hint_scroll - dy, 0, mx))
+                elif g.text_area.collidepoint(mp):
+                    vis = max(1, g.text_area.height // max(1, lh))
+                    mx = max(0, len(self._fp_lines) - vis)
+                    self._fp_scroll = int(np.clip(self._fp_scroll - dy, 0, mx))
+                return
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                g = self._flight_program_editor_geometry()
+                if g.default_btn.collidepoint(event.pos):
+                    self._flight_program_reset_to_default()
+                    return
+                if g.save_btn.collidepoint(event.pos):
+                    self._flight_program_save(c)
+                    return
+                if g.cancel_btn.collidepoint(event.pos):
+                    self._flight_program_cancel()
+                    return
+                if g.hint_panel.collidepoint(event.pos):
+                    pick = self._fp_hint_pick_line(event.pos, g.hint_panel)
+                    if pick:
+                        self._fp_insert_at_cursor(pick)
+                    return
+                if g.text_area.collidepoint(event.pos):
+                    shift = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
+                    old_c = (self._fp_cy, self._fp_cx)
+                    self._flight_program_cursor_from_click(event.pos, g.text_area)
+                    if shift:
+                        if self._fp_sel_mark is None:
+                            self._fp_sel_mark = old_c
+                    else:
+                        self._fp_sel_mark = None
+                        self._fp_drag_mark = (self._fp_cy, self._fp_cx)
+                        self._fp_drag_selecting = True
+                    return
+                if g.panel.collidepoint(event.pos):
+                    return
+                return
+            return
+
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.show_help:
                 self.show_help = False
                 return
             if self.esc_menu_open:
-                r_res, r_mode, r_lang, r_rst, r_log, r_quit = self._esc_menu_layout_full()
+                r_res, r_mode, r_lang, r_rst, r_log, r_fp, r_quit = self._esc_menu_layout_full()
                 if r_res.collidepoint(event.pos):
                     self.esc_menu_open = False
                     return
@@ -604,6 +758,9 @@ class UI:
                     return
                 if r_log.collidepoint(event.pos):
                     c.queue(Command(request_toggle_csv_logging=True))
+                    return
+                if r_fp.collidepoint(event.pos):
+                    self._flight_program_open_editor()
                     return
                 if r_quit.collidepoint(event.pos):
                     self._quit_requested = True
@@ -662,27 +819,598 @@ class UI:
                 if not lv.last_action_ok:
                     self._toast_until_ms = pygame.time.get_ticks() + 1800
                     self._toast_key = "lever_denied"
+                    self._toast_custom = None
                 return
+
+    def _fp_stop_text_input(self) -> None:
+        if self._fp_text_input_started:
+            try:
+                pygame.key.stop_text_input()
+            except Exception:
+                pass
+            self._fp_text_input_started = False
+        try:
+            pygame.key.set_repeat(0)
+        except Exception:
+            pass
+
+    def _fp_start_text_input(self) -> None:
+        if not self._fp_text_input_started:
+            try:
+                pygame.key.start_text_input()
+            except Exception:
+                pass
+            self._fp_text_input_started = True
+        try:
+            pygame.key.set_repeat(400, 42)
+        except Exception:
+            pass
+
+    def _on_flight_program_runtime_error(self, msg: str) -> None:
+        self.auto_mode = False
+        self._toast_until_ms = pygame.time.get_ticks() + 5000
+        self._toast_key = "fp_runtime_error"
+        self._toast_custom = msg[:220]
+
+    def _flight_program_editor_geometry(self) -> _FlightProgramEditorGeom:
+        pad = int(14 * self.ui_scale)
+        pw = min(int(self.visual_rect.width * 0.92), int(1120 * self.ui_scale))
+        ph = min(int(self.visual_rect.height * 0.88), int(720 * self.ui_scale))
+        panel = pygame.Rect(0, 0, pw, ph)
+        panel.center = self.visual_rect.center
+        btn_w, btn_h = int(132 * self.ui_scale), int(38 * self.ui_scale)
+        gap = int(10 * self.ui_scale)
+        footer_h = btn_h + pad * 2 + int(26 * self.ui_scale)
+        top_y = panel.top + int(56 * self.ui_scale)
+        body_h = max(int(120 * self.ui_scale), panel.height - int(56 * self.ui_scale) - footer_h)
+        inner_w = panel.width - 2 * pad
+        hint_w = min(int(300 * self.ui_scale), max(int(200 * self.ui_scale), int(inner_w * 0.34)))
+        split_gap = int(8 * self.ui_scale)
+        text_w = max(int(200 * self.ui_scale), inner_w - split_gap - hint_w)
+        text_area = pygame.Rect(panel.left + pad, top_y, text_w, body_h)
+        hint_panel = pygame.Rect(text_area.right + split_gap, top_y, hint_w, body_h)
+        def_w = min(int(168 * self.ui_scale), int(inner_w * 0.22))
+        def_w = max(def_w, int(120 * self.ui_scale))
+        default_btn = pygame.Rect(panel.left + pad, panel.bottom - pad - btn_h, def_w, btn_h)
+        save_btn = pygame.Rect(panel.right - pad - 2 * btn_w - gap, panel.bottom - pad - btn_h, btn_w, btn_h)
+        cancel_btn = pygame.Rect(panel.right - pad - btn_w, panel.bottom - pad - btn_h, btn_w, btn_h)
+        return _FlightProgramEditorGeom(panel, text_area, hint_panel, default_btn, save_btn, cancel_btn)
+
+    def _flight_program_open_editor(self) -> None:
+        self.esc_menu_open = False
+        self._fp_lines = self.flight_program_source_saved.split("\n")
+        if not self._fp_lines:
+            self._fp_lines = [""]
+        self._fp_cy = 0
+        self._fp_cx = 0
+        self._fp_scroll = 0
+        self._fp_hint_scroll = 0
+        self._fp_compile_error = None
+        self._fp_sel_mark = None
+        self._fp_drag_mark = None
+        self._fp_drag_selecting = False
+        self.flight_program_editor_open = True
+        self._fp_start_text_input()
+
+    def _flight_program_cancel(self) -> None:
+        self._fp_lines = self.flight_program_source_saved.split("\n")
+        if not self._fp_lines:
+            self._fp_lines = [""]
+        self._fp_cy = 0
+        self._fp_cx = 0
+        self._fp_scroll = 0
+        self._fp_sel_mark = None
+        self._fp_drag_mark = None
+        self._fp_drag_selecting = False
+        self._fp_compile_error = None
+        self.flight_program_editor_open = False
+        self._fp_stop_text_input()
+        self.esc_menu_open = True
+
+    def _flight_program_save(self, c: Controller) -> None:
+        src = "\n".join(self._fp_lines)
+        tick, err, g = compile_flight_program(src)
+        if err is not None:
+            self._fp_compile_error = err
+            self._toast_until_ms = pygame.time.get_ticks() + 4500
+            self._toast_key = "fp_compile_error"
+            self._toast_custom = err[:220]
+            return
+        verr = validate_flight_program_tick(tick, c.model, self.stats, g)
+        if verr is not None:
+            self._fp_compile_error = f"{self.t('fp_validate_error')}: {verr}"
+            self._toast_until_ms = pygame.time.get_ticks() + 5000
+            self._toast_key = "fp_validate_error"
+            self._toast_custom = verr[:220]
+            return
+        self.flight_program_source_saved = src
+        self.flight_program_tick = tick
+        self.flight_program_globals = g
+        self.flight_program_sleep_until_s = None
+        self._fp_compile_error = None
+        self._toast_custom = None
+        self.flight_program_editor_open = False
+        self._fp_stop_text_input()
+        self.esc_menu_open = True
+
+    def _fp_expand(self, s: str) -> str:
+        return s.replace("\t", "    ")
+
+    def _fp_text_width_prefix(self, line: str, idx: int) -> int:
+        return self._fp_font.size(self._fp_expand(line[:idx]))[0]
+
+    def _fp_line_height(self) -> int:
+        return self._fp_font.get_height() + int(4 * self.ui_scale)
+
+    def _fp_ensure_cursor_in_view(self, text_area: pygame.Rect) -> None:
+        lh = self._fp_line_height()
+        vis = max(1, text_area.height // max(1, lh))
+        self._fp_cy = int(np.clip(self._fp_cy, 0, max(0, len(self._fp_lines) - 1)))
+        line = self._fp_lines[self._fp_cy]
+        self._fp_cx = int(np.clip(self._fp_cx, 0, len(line)))
+        if self._fp_cy < self._fp_scroll:
+            self._fp_scroll = self._fp_cy
+        if self._fp_cy >= self._fp_scroll + vis:
+            self._fp_scroll = self._fp_cy - vis + 1
+        self._fp_scroll = int(np.clip(self._fp_scroll, 0, max(0, len(self._fp_lines) - 1)))
+
+    def _fp_col_at_pixel(self, line: str, x_px: int, text_left: int) -> int:
+        rel = x_px - text_left
+        if rel <= 0:
+            return 0
+        lo, hi = 0, len(line)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._fp_text_width_prefix(line, mid) <= rel:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+
+    def _fp_hint_entries(self) -> list[tuple[str, bool]]:
+        rows: list[tuple[str, bool]] = [(self.t("fp_header_sim"), True)]
+        rows.extend((s, False) for s in SIM_API_COMPLETIONS)
+        rows.append((self.t("fp_header_ap"), True))
+        rows.extend((a, False) for a in AP_API_COMPLETIONS)
+        return rows
+
+    def _fp_hint_row_height(self) -> int:
+        return self.font_small.get_height() + int(4 * self.ui_scale)
+
+    def _fp_hint_max_scroll(self, hint_panel: pygame.Rect) -> int:
+        entries = len(self._fp_hint_entries())
+        list_top = int(48 * self.ui_scale)
+        vis = max(1, (hint_panel.height - list_top) // max(1, self._fp_hint_row_height()))
+        return max(0, entries - vis)
+
+    def _fp_hint_pick_line(self, pos: tuple[int, int], hint_panel: pygame.Rect) -> Optional[str]:
+        entries = self._fp_hint_entries()
+        row_h = self._fp_hint_row_height()
+        list_top = hint_panel.top + int(48 * self.ui_scale)
+        if pos[1] < list_top or pos[1] >= hint_panel.bottom - int(4 * self.ui_scale):
+            return None
+        rel = pos[1] - list_top + self._fp_hint_scroll * row_h
+        idx = int(rel // max(1, row_h))
+        if 0 <= idx < len(entries):
+            text, is_hdr = entries[idx]
+            if not is_hdr:
+                return text
+        return None
+
+    def _fp_try_tab_complete(self) -> bool:
+        if self._fp_has_selection():
+            self._fp_delete_selection()
+        line = self._fp_lines[self._fp_cy]
+        bef = line[: self._fp_cx]
+        mo = re.search(r"((?:sim|ap)\.[\w]*)$", bef)
+        if not mo:
+            return False
+        prefix_full = mo.group(1)
+        pool = list(SIM_API_COMPLETIONS) + list(AP_API_COMPLETIONS)
+        cands = [x for x in pool if x.startswith(prefix_full)]
+        if not cands:
+            return False
+
+        def lcp_str(strs: list[str]) -> str:
+            p = strs[0]
+            for s in strs[1:]:
+                while p and not s.startswith(p):
+                    p = p[:-1]
+            return p
+
+        lcp = lcp_str(cands)
+        if len(lcp) <= len(prefix_full):
+            return False
+        start = mo.start(1)
+        new_bef = bef[:start] + lcp
+        self._fp_lines[self._fp_cy] = new_bef + line[self._fp_cx :]
+        self._fp_cx = len(new_bef)
+        self._fp_sel_mark = None
+        g = self._flight_program_editor_geometry()
+        self._fp_ensure_cursor_in_view(g.text_area)
+        return True
+
+    def _fp_insert_at_cursor(self, insertion: str) -> None:
+        if self._fp_has_selection():
+            self._fp_delete_selection()
+        line = self._fp_lines[self._fp_cy]
+        self._fp_lines[self._fp_cy] = line[: self._fp_cx] + insertion + line[self._fp_cx :]
+        self._fp_cx += len(insertion)
+        self._fp_sel_mark = None
+        g = self._flight_program_editor_geometry()
+        self._fp_ensure_cursor_in_view(g.text_area)
+
+    def _fp_selection_carets_ordered(self) -> Optional[tuple[int, int, int, int]]:
+        """Half-open range between two carets: (sy, sx, ey, ex), ex exclusive on last line."""
+        if self._fp_sel_mark is None:
+            return None
+        a, b = self._fp_sel_mark, (self._fp_cy, self._fp_cx)
+        if a == b:
+            return None
+        if a <= b:
+            return (a[0], a[1], b[0], b[1])
+        return (b[0], b[1], a[0], a[1])
+
+    def _fp_has_selection(self) -> bool:
+        return self._fp_selection_carets_ordered() is not None
+
+    def _fp_delete_selection(self) -> None:
+        b = self._fp_selection_carets_ordered()
+        if not b:
+            return
+        sy, sx, ey, ex = b
+        if sy == ey:
+            ln = self._fp_lines[sy]
+            self._fp_lines[sy] = ln[:sx] + ln[ex:]
+        else:
+            merged = self._fp_lines[sy][:sx] + self._fp_lines[ey][ex:]
+            self._fp_lines[sy : ey + 1] = [merged]
+        self._fp_cy, self._fp_cx = sy, sx
+        self._fp_sel_mark = None
+        g = self._flight_program_editor_geometry()
+        self._fp_ensure_cursor_in_view(g.text_area)
+
+    def _fp_get_selection_text(self) -> str:
+        b = self._fp_selection_carets_ordered()
+        if not b:
+            return ""
+        sy, sx, ey, ex = b
+        if sy == ey:
+            return self._fp_lines[sy][sx:ex]
+        parts = [self._fp_lines[sy][sx:]]
+        for i in range(sy + 1, ey):
+            parts.append(self._fp_lines[i])
+        parts.append(self._fp_lines[ey][:ex])
+        return "\n".join(parts)
+
+    def _fp_clipboard_set(self, text: str) -> None:
+        try:
+            if not pygame.scrap.get_init():
+                pygame.scrap.init()
+            pygame.scrap.put(pygame.SCRAP_TEXT, text.encode("utf-8"))
+        except Exception:
+            pass
+        self._fp_internal_clipboard = text
+
+    def _fp_clipboard_get(self) -> str:
+        try:
+            if pygame.scrap.get_init():
+                raw = pygame.scrap.get(pygame.SCRAP_TEXT)
+                if raw:
+                    if isinstance(raw, bytes):
+                        return raw.decode("utf-8", errors="replace")
+                    return str(raw)
+        except Exception:
+            pass
+        return self._fp_internal_clipboard
+
+    def _flight_program_reset_to_default(self) -> None:
+        self._fp_lines = DEFAULT_SCRIPT.split("\n")
+        if not self._fp_lines:
+            self._fp_lines = [""]
+        self._fp_cy = 0
+        self._fp_cx = 0
+        self._fp_scroll = 0
+        self._fp_sel_mark = None
+        self._fp_drag_mark = None
+        self._fp_drag_selecting = False
+        self._fp_compile_error = None
+        g = self._flight_program_editor_geometry()
+        self._fp_ensure_cursor_in_view(g.text_area)
+
+    def _fp_clamp_pos_to_text_area(self, pos: tuple[int, int], text_area: pygame.Rect) -> tuple[int, int]:
+        return (
+            int(np.clip(pos[0], text_area.left + 1, text_area.right - 2)),
+            int(np.clip(pos[1], text_area.top + 1, text_area.bottom - 2)),
+        )
+
+    def _flight_program_cursor_from_click(self, pos: tuple[int, int], text_area: pygame.Rect) -> None:
+        lh = self._fp_line_height()
+        rel_y = pos[1] - text_area.top
+        line_idx = self._fp_scroll + max(0, rel_y // max(1, lh))
+        line_idx = int(np.clip(line_idx, 0, max(0, len(self._fp_lines) - 1)))
+        self._fp_cy = line_idx
+        self._fp_cx = self._fp_col_at_pixel(self._fp_lines[line_idx], pos[0], text_area.left + int(6 * self.ui_scale))
+        self._fp_ensure_cursor_in_view(text_area)
+
+    def _fp_draw_selection_highlight(
+        self, surf: pygame.Surface, ta: pygame.Rect, line_idx: int, y: int, line: str, lh: int, tx: int
+    ) -> None:
+        b = self._fp_selection_carets_ordered()
+        if not b:
+            return
+        sy, sx, ey, ex = b
+        if line_idx < sy or line_idx > ey:
+            return
+        if line_idx == sy == ey:
+            c0, c1 = sx, ex
+        elif line_idx == sy:
+            c0, c1 = sx, len(line)
+        elif line_idx == ey:
+            c0, c1 = 0, ex
+        else:
+            c0, c1 = 0, len(line)
+        if c0 >= c1:
+            return
+        x0 = tx + self._fp_text_width_prefix(line, c0)
+        x1 = tx + self._fp_text_width_prefix(line, c1)
+        sel_rect = pygame.Rect(x0, y + 1, max(1, x1 - x0), lh - 2)
+        pygame.draw.rect(surf, (55, 65, 95), sel_rect, border_radius=2)
+
+    def _flight_program_insert_text(self, text: str) -> None:
+        if not text or text == "\r":
+            return
+        if self._fp_has_selection():
+            self._fp_delete_selection()
+        for ch in text:
+            if ch == "\n":
+                self._flight_program_split_line()
+            elif ch == "\r":
+                continue
+            else:
+                line = self._fp_lines[self._fp_cy]
+                self._fp_lines[self._fp_cy] = line[: self._fp_cx] + ch + line[self._fp_cx :]
+                self._fp_cx += 1
+        self._fp_sel_mark = None
+        g = self._flight_program_editor_geometry()
+        self._fp_ensure_cursor_in_view(g.text_area)
+
+    def _flight_program_split_line(self) -> None:
+        if self._fp_has_selection():
+            self._fp_delete_selection()
+        line = self._fp_lines[self._fp_cy]
+        tail = line[self._fp_cx :]
+        self._fp_lines[self._fp_cy] = line[: self._fp_cx]
+        self._fp_lines.insert(self._fp_cy + 1, tail)
+        self._fp_cy += 1
+        self._fp_cx = 0
+        self._fp_sel_mark = None
+
+    def _flight_program_handle_keydown(self, event: pygame.event.Event, c: Controller) -> None:
+        g = self._flight_program_editor_geometry()
+        ta = g.text_area
+        mod = event.mod
+        ctrl = bool(mod & pygame.KMOD_CTRL) or bool(mod & pygame.KMOD_META)
+        shift = bool(mod & pygame.KMOD_SHIFT)
+        sc = event.scancode
+
+        if ctrl and sc == pygame.KSCAN_A:
+            self._fp_sel_mark = (0, 0)
+            self._fp_cy = len(self._fp_lines) - 1
+            self._fp_cx = len(self._fp_lines[self._fp_cy])
+            self._fp_ensure_cursor_in_view(ta)
+            return
+        if ctrl and sc == pygame.KSCAN_C:
+            txt = self._fp_get_selection_text()
+            if txt:
+                self._fp_clipboard_set(txt)
+            return
+        if ctrl and sc == pygame.KSCAN_X:
+            txt = self._fp_get_selection_text()
+            if txt:
+                self._fp_clipboard_set(txt)
+                self._fp_delete_selection()
+            return
+        if ctrl and sc == pygame.KSCAN_V:
+            self._flight_program_insert_text(self._fp_clipboard_get())
+            return
+
+        if sc in (pygame.KSCAN_RETURN, pygame.KSCAN_KP_ENTER):
+            self._flight_program_split_line()
+            self._fp_ensure_cursor_in_view(ta)
+            return
+        if sc == pygame.KSCAN_TAB:
+            if self._fp_try_tab_complete():
+                return
+            self._flight_program_insert_text("    ")
+            return
+        if sc == pygame.KSCAN_BACKSPACE:
+            if self._fp_has_selection():
+                self._fp_delete_selection()
+            else:
+                line = self._fp_lines[self._fp_cy]
+                if self._fp_cx > 0:
+                    self._fp_lines[self._fp_cy] = line[: self._fp_cx - 1] + line[self._fp_cx :]
+                    self._fp_cx -= 1
+                elif self._fp_cy > 0:
+                    prev = self._fp_lines[self._fp_cy - 1]
+                    self._fp_cx = len(prev)
+                    self._fp_lines[self._fp_cy - 1] = prev + line
+                    del self._fp_lines[self._fp_cy]
+                    self._fp_cy -= 1
+            self._fp_sel_mark = None
+            self._fp_ensure_cursor_in_view(ta)
+            return
+        if sc == pygame.KSCAN_DELETE:
+            if self._fp_has_selection():
+                self._fp_delete_selection()
+            else:
+                line = self._fp_lines[self._fp_cy]
+                if self._fp_cx < len(line):
+                    self._fp_lines[self._fp_cy] = line[: self._fp_cx] + line[self._fp_cx + 1 :]
+                elif self._fp_cy < len(self._fp_lines) - 1:
+                    self._fp_lines[self._fp_cy] = line + self._fp_lines[self._fp_cy + 1]
+                    del self._fp_lines[self._fp_cy + 1]
+            self._fp_sel_mark = None
+            self._fp_ensure_cursor_in_view(ta)
+            return
+        if sc == pygame.KSCAN_LEFT:
+            if shift and not ctrl and self._fp_sel_mark is None:
+                self._fp_sel_mark = (self._fp_cy, self._fp_cx)
+            elif not shift:
+                self._fp_sel_mark = None
+            if self._fp_cx > 0:
+                self._fp_cx -= 1
+            elif self._fp_cy > 0:
+                self._fp_cy -= 1
+                self._fp_cx = len(self._fp_lines[self._fp_cy])
+            self._fp_ensure_cursor_in_view(ta)
+            return
+        if sc == pygame.KSCAN_RIGHT:
+            if shift and not ctrl and self._fp_sel_mark is None:
+                self._fp_sel_mark = (self._fp_cy, self._fp_cx)
+            elif not shift:
+                self._fp_sel_mark = None
+            line = self._fp_lines[self._fp_cy]
+            if self._fp_cx < len(line):
+                self._fp_cx += 1
+            elif self._fp_cy < len(self._fp_lines) - 1:
+                self._fp_cy += 1
+                self._fp_cx = 0
+            self._fp_ensure_cursor_in_view(ta)
+            return
+        if sc == pygame.KSCAN_UP:
+            if shift and not ctrl and self._fp_sel_mark is None:
+                self._fp_sel_mark = (self._fp_cy, self._fp_cx)
+            elif not shift:
+                self._fp_sel_mark = None
+            if self._fp_cy > 0:
+                self._fp_cy -= 1
+                self._fp_cx = min(self._fp_cx, len(self._fp_lines[self._fp_cy]))
+            self._fp_ensure_cursor_in_view(ta)
+            return
+        if sc == pygame.KSCAN_DOWN:
+            if shift and not ctrl and self._fp_sel_mark is None:
+                self._fp_sel_mark = (self._fp_cy, self._fp_cx)
+            elif not shift:
+                self._fp_sel_mark = None
+            if self._fp_cy < len(self._fp_lines) - 1:
+                self._fp_cy += 1
+                self._fp_cx = min(self._fp_cx, len(self._fp_lines[self._fp_cy]))
+            self._fp_ensure_cursor_in_view(ta)
+            return
+        if sc == pygame.KSCAN_HOME:
+            if shift and not ctrl and self._fp_sel_mark is None:
+                self._fp_sel_mark = (self._fp_cy, self._fp_cx)
+            elif not shift:
+                self._fp_sel_mark = None
+            self._fp_cx = 0
+            if ctrl and self._fp_cy > 0:
+                self._fp_cy = 0
+            self._fp_ensure_cursor_in_view(ta)
+            return
+        if sc == pygame.KSCAN_END:
+            if shift and not ctrl and self._fp_sel_mark is None:
+                self._fp_sel_mark = (self._fp_cy, self._fp_cx)
+            elif not shift:
+                self._fp_sel_mark = None
+            if ctrl:
+                self._fp_cy = len(self._fp_lines) - 1
+            self._fp_cx = len(self._fp_lines[self._fp_cy])
+            self._fp_ensure_cursor_in_view(ta)
+            return
+        if ctrl and sc == pygame.KSCAN_S:
+            self._flight_program_save(c)
+            return
+
+    def _fp_draw_highlighted_line(self, surf: pygame.Surface, x: int, y: int, line: str) -> None:
+        font = self._fp_font
+        x0 = x
+        for text, kind in iter_flight_program_tokens(line):
+            seg = text.replace("\t", "    ")
+            if not seg:
+                continue
+            col = _FP_SYNTAX_COLORS.get(kind, (218, 220, 228))
+            surf.blit(font.render(seg, True, col), (x0, y))
+            x0 += font.size(seg)[0]
+
+    def _draw_flight_program_editor(self, surf: pygame.Surface) -> None:
+        g = self._flight_program_editor_geometry()
+        dim = pygame.Surface(self.visual_rect.size, pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 200))
+        surf.blit(dim, (0, 0))
+        pygame.draw.rect(surf, (32, 34, 42), g.panel, border_radius=12)
+        pygame.draw.rect(surf, (140, 145, 165), g.panel, width=2, border_radius=12)
+        title = self._cached_render(self.font_big, self.t("fp_title"), (240, 240, 245))
+        surf.blit(title, (g.panel.left + int(16 * self.ui_scale), g.panel.top + int(12 * self.ui_scale)))
+        hint = self._cached_render(self.font_small, self.t("fp_hint"), (170, 175, 190))
+        surf.blit(hint, (g.panel.left + int(16 * self.ui_scale), g.panel.top + int(40 * self.ui_scale)))
+
+        ta = g.text_area
+        pygame.draw.rect(surf, (18, 18, 22), ta, border_radius=8)
+        pygame.draw.rect(surf, (90, 92, 105), ta, width=1, border_radius=8)
+        clip = surf.get_clip()
+        surf.set_clip(ta.inflate(-4, -4))
+        lh = self._fp_line_height()
+        line0 = self._fp_scroll
+        vis = (ta.height - int(8 * self.ui_scale)) // max(1, lh) + 1
+        y0 = ta.top + int(4 * self.ui_scale)
+        tx = ta.left + int(6 * self.ui_scale)
+        for j, i in enumerate(range(line0, min(len(self._fp_lines), line0 + vis + 1))):
+            ln_i = self._fp_lines[i]
+            self._fp_draw_selection_highlight(surf, ta, i, y0 + j * lh, ln_i, lh, tx)
+            self._fp_draw_highlighted_line(surf, tx, y0 + j * lh, ln_i)
+        cur_line = self._fp_lines[self._fp_cy]
+        cx_px = tx + self._fp_text_width_prefix(cur_line, self._fp_cx)
+        cy_px = y0 + (self._fp_cy - self._fp_scroll) * lh
+        if (pygame.time.get_ticks() // 500) % 2 == 0 and ta.inflate(-2, -2).collidepoint(cx_px, cy_px + lh // 2):
+            pygame.draw.line(surf, (250, 200, 120), (cx_px, cy_px + 2), (cx_px, cy_px + lh - 4), 2)
+        surf.set_clip(clip)
+
+        hp = g.hint_panel
+        pygame.draw.rect(surf, (22, 24, 30), hp, border_radius=8)
+        pygame.draw.rect(surf, (85, 90, 105), hp, width=1, border_radius=8)
+        ht = self._cached_render(self.font_small, self.t("fp_hints_title"), (210, 215, 225))
+        surf.blit(ht, (hp.left + int(8 * self.ui_scale), hp.top + int(6 * self.ui_scale)))
+        doc = self._cached_render(self.font_small, self.t("fp_doc_ref"), (130, 150, 175))
+        surf.blit(doc, (hp.left + int(8 * self.ui_scale), hp.top + int(22 * self.ui_scale)))
+        hclip = surf.get_clip()
+        surf.set_clip(hp.inflate(-6, -6))
+        entries = self._fp_hint_entries()
+        row_h = self._fp_hint_row_height()
+        list_y0 = hp.top + int(48 * self.ui_scale)
+        first = self._fp_hint_scroll
+        max_rows = int((hp.bottom - list_y0 - int(6 * self.ui_scale)) / max(1, row_h)) + 1
+        for row_i in range(first, min(len(entries), first + max_rows)):
+            text, is_hdr = entries[row_i]
+            yy = list_y0 + (row_i - first) * row_h
+            col = (200, 190, 120) if is_hdr else (175, 210, 235)
+            lbl = self._cached_render(self.font_small, text, col)
+            surf.blit(lbl, (hp.left + int(8 * self.ui_scale), yy))
+        surf.set_clip(hclip)
+        if self._fp_hint_max_scroll(hp) > 0:
+            sb = f"↕ {self._fp_hint_scroll + 1}/{self._fp_hint_max_scroll(hp) + 1}"
+            surf.blit(self._cached_render(self.font_small, sb, (120, 125, 140)), (hp.right - int(70 * self.ui_scale), hp.bottom - int(16 * self.ui_scale)))
+
+        def pill(rect: pygame.Rect, label: str, hot: bool) -> None:
+            bgc = (52, 58, 72) if hot else (40, 42, 50)
+            pygame.draw.rect(surf, bgc, rect, border_radius=8)
+            pygame.draw.rect(surf, (160, 165, 180), rect, width=2, border_radius=8)
+            t = self._cached_render(self.font_small, label, (235, 235, 240))
+            surf.blit(t, t.get_rect(center=rect.center))
+
+        pill(g.default_btn, self.t("fp_reset_default"), True)
+        pill(g.save_btn, self.t("fp_save"), True)
+        pill(g.cancel_btn, self.t("fp_cancel"), True)
+        if self._fp_compile_error:
+            err_s = self._cached_render(self.font_small, self._fp_compile_error[:200], (230, 120, 110))
+            surf.blit(err_s, (g.panel.left + int(14 * self.ui_scale), g.save_btn.top - int(22 * self.ui_scale)))
 
     def apply_continuous_controls(self, c: Controller) -> None:
         c.queue(Command(throttle_0_1=self.throttle_slider.value if c.model.engine_on else 0.0))
 
         if self.auto_mode and c.model.result == SimResult.RUNNING:
-            if c.model.can_heatshield_jettison:
-                c.queue(Command(request_heatshield_jettison=True))
-            if c.model.can_drogue and (c.model.altitude_m > 180_000.0):
-                c.queue(Command(request_drogue=True))
-            if c.model.can_main and (c.model.altitude_m < 160_000.0):
-                c.queue(Command(request_main=True))
-            if c.model.can_chute_jettison and (c.model.altitude_m < 2_000.0):
-                c.queue(Command(request_chute_jettison=True))
-
-            if c.model.altitude_m < 2_000.0 and c.model.chute_jettisoned:
-                c.queue(Command(engine_on=True))
-                target_v = -20.0 if c.model.altitude_m > 200.0 else -4.0
-                error = target_v - c.model.vertical_speed_mps
-                cmd = float(np.clip(0.02 * error, 0.0, 1.0))
-                self.throttle_slider.value = cmd
+            FlightProgramRunner.run(self, c)
 
     def time_scale(self) -> float:
         return slider_to_time_scale(self.time_scale_slider.value)
@@ -1016,8 +1744,8 @@ class UI:
         val = self._cached_render(self.font, f"{temp_c:.1f} C", (240, 240, 245))
         surf.blit(val, (rect.left + 10, rect.bottom - val.get_height() - 8))
 
-    def draw_overlay(self, surf: pygame.Surface, c: Controller) -> None:
-        # Overlay UI panels (semi-transparent black for readability).
+    def _draw_overlay_hud(self, surf: pygame.Surface, c: Controller) -> None:
+        # HUD only (instruments, map chrome, controls). Modals draw separately after minimap.
         def panel_bg(r: pygame.Rect) -> None:
             bg = pygame.Surface(r.size, pygame.SRCALPHA)
             bg.fill((0, 0, 0, 110))
@@ -1213,6 +1941,9 @@ class UI:
 
         self._draw_controls(surf, c)
         self._draw_mission_dossier_button(surf, c)
+
+    def draw_overlay(self, surf: pygame.Surface, c: Controller) -> None:
+        self._draw_overlay_hud(surf, c)
         self._draw_modal_overlays(surf, c)
 
     def _draw_telemetry_panel(self, surf: pygame.Surface) -> None:
@@ -1257,8 +1988,12 @@ class UI:
         if self.esc_menu_open:
             self._draw_esc_menu(surf, c)
 
+        if self.flight_program_editor_open:
+            self._draw_flight_program_editor(surf)
+
         if now < self._toast_until_ms:
-            toast = self._cached_render(self.font_small, self.t(self._toast_key), (255, 200, 120))
+            toast_txt = self._toast_custom if self._toast_custom else self.t(self._toast_key)
+            toast = self._cached_render(self.font_small, toast_txt, (255, 200, 120))
             bx = toast.get_width() + 24
             by = toast.get_height() + 16
             bg = pygame.Surface((bx, by), pygame.SRCALPHA)
@@ -1297,7 +2032,7 @@ class UI:
         dim = pygame.Surface(self.visual_rect.size, pygame.SRCALPHA)
         dim.fill((0, 0, 0, 160))
         surf.blit(dim, (0, 0))
-        r_res, r_mode, r_lang, r_rst, r_log, r_quit = self._esc_menu_layout_full()
+        r_res, r_mode, r_lang, r_rst, r_log, r_fp, r_quit = self._esc_menu_layout_full()
         title = self._cached_render(self.font_big, self.t("esc_title"), (240, 240, 245))
         cx = self.visual_rect.centerx
         surf.blit(title, title.get_rect(center=(cx, r_res.top - int(36 * self.ui_scale))))
@@ -1315,6 +2050,7 @@ class UI:
         pill(r_lang, self.t("lang"), True)
         pill(r_rst, self.t("restart"), True)
         pill(r_log, self.t("csv_log_on") if log_on else self.t("csv_log_off"), log_on)
+        pill(r_fp, self.t("esc_flight_program"), True)
         pill(r_quit, self.t("esc_quit"), True)
 
     def _draw_controls(self, surf: pygame.Surface, c: Controller) -> None:

@@ -14,6 +14,7 @@ import pygame
 
 from control.controller import Controller
 from digital_twin.model import PhysicsModel, SimResult
+from flight_program import DEFAULT_SCRIPT, compile_flight_program
 from ui import UI
 from render import Renderer
 
@@ -55,6 +56,30 @@ def _migrate_ui_state(prev: UI, new: UI) -> None:
     new.show_help = prev.show_help
     new.esc_menu_open = prev.esc_menu_open
     new.mission_report_open = prev.mission_report_open
+    new.flight_program_source_saved = prev.flight_program_source_saved
+    tick, _err, g = compile_flight_program(new.flight_program_source_saved)
+    if tick is None:
+        tick, _, g = compile_flight_program(DEFAULT_SCRIPT)
+    new.flight_program_tick = tick
+    new.flight_program_globals = g
+    new.flight_program_sleep_until_s = getattr(prev, "flight_program_sleep_until_s", None)
+    new.flight_program_editor_open = prev.flight_program_editor_open
+    new._fp_lines = list(getattr(prev, "_fp_lines", [""]))
+    new._fp_cy = int(getattr(prev, "_fp_cy", 0))
+    new._fp_cx = int(getattr(prev, "_fp_cx", 0))
+    new._fp_scroll = int(getattr(prev, "_fp_scroll", 0))
+    new._fp_hint_scroll = int(getattr(prev, "_fp_hint_scroll", 0))
+    new._fp_sel_mark = getattr(prev, "_fp_sel_mark", None)
+    new._fp_drag_mark = getattr(prev, "_fp_drag_mark", None)
+    new._fp_drag_selecting = bool(getattr(prev, "_fp_drag_selecting", False))
+    new._fp_internal_clipboard = getattr(prev, "_fp_internal_clipboard", "")
+    new._fp_compile_error = getattr(prev, "_fp_compile_error", None)
+    new._toast_custom = getattr(prev, "_toast_custom", None)
+    new._toast_until_ms = getattr(prev, "_toast_until_ms", 0)
+    new._toast_key = getattr(prev, "_toast_key", "lever_denied")
+    new._fp_text_input_started = False
+    if new.flight_program_editor_open:
+        new._fp_start_text_input()
 
 
 def main() -> int:
@@ -92,7 +117,7 @@ def main() -> int:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_F11:
+            elif event.type == pygame.KEYDOWN and event.scancode == pygame.KSCAN_F11:
                 fullscreen = not fullscreen
                 screen = _make_display((config.width, config.height), fullscreen=fullscreen)
                 prev_ui = ui
@@ -109,8 +134,8 @@ def main() -> int:
             else:
                 ui.handle_event(event, controller)
 
-        # Simulation pause is the Esc menu (resume/quit); no separate pause-without-menu.
-        paused = ui.esc_menu_open
+        # Simulation pause is the Esc menu or the flight program editor.
+        paused = ui.esc_menu_open or ui.flight_program_editor_open
 
         if ui.consume_quit_request():
             running = False
