@@ -1,12 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
+# One-file bundle for main.py: pygame UI + render.py. data/ is bundled at data/.
+# Optional render_gl.py (PyOpenGL) is not imported by main.py and is excluded here
+# so the build works without PyOpenGL installed.
+
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('data', 'data')]
 binaries = []
-hiddenimports = ['OpenGL', 'OpenGL.GL', 'OpenGL.GLU']
-tmp_ret = collect_all('pygame')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports = []
 
+tmp_ret = collect_all('pygame')
+datas += tmp_ret[0]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
+
+# Explicit subpackages (helps one-file edge cases for digital_twin.models.*).
+hiddenimports += [
+    'digital_twin',
+    'digital_twin.models.atmosphere',
+    'digital_twin.models.wind',
+    'control',
+    'flight_program',
+]
 
 a = Analysis(
     ['main.py'],

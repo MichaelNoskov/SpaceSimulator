@@ -104,7 +104,7 @@ python main.py
 | **Linux x86_64** | `standalone/linux/TitanLandingSimulator` | из корня репозитория: `./standalone/linux/TitanLandingSimulator` (при необходимости: `chmod +x standalone/linux/TitanLandingSimulator`) |
 | **Windows** | `standalone/windows/TitanLandingSimulator.exe` | после локальной сборки скриптом `scripts\build_windows.ps1` |
 
-Пересборка: на Linux — `./scripts/build_linux.sh`, на Windows — `.\scripts\build_windows.ps1`.
+Пересборка: на Linux — `./scripts/build_linux.sh`, на Windows — `.\scripts\build_windows.ps1` (скрипты создают при необходимости `.venv`, ставят `requirements.txt` и `scripts/requirements-build.txt` с PyInstaller, затем собирают `TitanLandingSimulator.spec`).
 
 Если при запуске однофайлового бинарника на Linux появляется ошибка вроде **`Failed to extract libcrypto.so.3`** или сбоя распаковки: проверьте свободное место в **`/tmp`** и на диске (PyInstaller распаковывает содержимое во временный каталог; при переполнении диска распаковка падает). Убедитесь, что запускаете бинарник, собранный под ту же разрядность ОС (x86_64).
 

@@ -102,7 +102,7 @@ Prebuilt apps live under **`standalone/`** — no Python install required.
 | **Linux x86_64** | `standalone/linux/TitanLandingSimulator` | From repo root: `./standalone/linux/TitanLandingSimulator` (if needed: `chmod +x standalone/linux/TitanLandingSimulator`) |
 | **Windows** | `standalone/windows/TitanLandingSimulator.exe` | produced locally by `scripts\build_windows.ps1` |
 
-Rebuild: Linux — `./scripts/build_linux.sh`, Windows — `.\scripts\build_windows.ps1`.
+Rebuild: Linux — `./scripts/build_linux.sh`, Windows — `.\scripts\build_windows.ps1` (each creates `.venv` if needed, installs `requirements.txt` plus `scripts/requirements-build.txt` including PyInstaller, then builds `TitanLandingSimulator.spec`).
 
 If the Linux one-file binary fails with **`Failed to extract libcrypto.so.3`** or a decompression error: check free space under **`/tmp`** and on the drive (PyInstaller unpacks there; a full disk breaks extraction). Run a build that matches your OS ABI (x86_64).
 
