@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -11,6 +12,9 @@ from typing import Iterable
 R_SPECIFIC_TITAN = 296.8  # N2-dominated, same as DigitalTwinConfig
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+
+from digital_twin.config import WindConfig
 NASA_PDS = REPO / "data" / "nasa_pds"
 HASI = NASA_PDS / "hasi_profiles"
 DWE_DIR = NASA_PDS / "dwe"
@@ -117,51 +121,79 @@ def build_titan_atm_json(rows: Iterable[tuple[float, float, float, float]]) -> d
     }
 
 
-def parse_zonal_wind(path: Path) -> tuple[list[float], list[float]]:
-    """DWE ZONALWIND.TAB: UTC, alt_km, zonal_mps, err_mps (whitespace separated)."""
-    alt_m: list[float] = []
-    vx: list[float] = []
+def parse_zonal_wind(path: Path) -> tuple[list[float], list[float], list[float], list[float]]:
+    """DWE ZONALWIND.TAB: UTC, alt_km, zonal_mps, err_mps. Dedupe equal altitudes (last wins)."""
+    raw: list[tuple[float, float, float]] = []
     for line in _read_lines(path):
         line = line.strip()
         if not line:
             continue
         parts = line.split()
-        if len(parts) < 3:
+        if len(parts) < 4:
             continue
         if "T" not in parts[0]:
             continue
         try:
             alt_km = float(parts[1])
             w = float(parts[2])
+            err = float(parts[3])
         except ValueError:
             continue
-        alt_m.append(round(alt_km * 1000.0, 3))
-        vx.append(round(w, 5))
-    # ascending altitude for interpolation
-    pairs = sorted(zip(alt_m, vx), key=lambda z: z[0])
-    alt_m = [p[0] for p in pairs]
-    vx = [p[1] for p in pairs]
-    return alt_m, vx
+        raw.append((round(alt_km * 1000.0, 3), w, max(0.05, err)))
+    by_alt: dict[float, tuple[float, float, float]] = {}
+    for a, w, e in sorted(raw, key=lambda z: z[0]):
+        by_alt[round(a, 1)] = (a, w, e)
+    rows = sorted(by_alt.values(), key=lambda z: z[0])
+    alt_m = [r[0] for r in rows]
+    vx = [round(r[1], 5) for r in rows]
+    sig = [round(r[2], 5) for r in rows]
+    wc = WindConfig()
+    lam = float(wc.meridional_wavelength_m)
+    ms = float(wc.meridional_strength)
+    vz = [round(ms * vx[i] * math.sin(2.0 * math.pi * alt_m[i] / lam), 5) for i in range(len(alt_m))]
+    return alt_m, vx, vz, sig
 
 
-def extend_wind_for_entry(alt_m: list[float], vx: list[float], top_m: float = 1_400_000.0) -> tuple[list[float], list[float]]:
-    """DWE ends near ~144 km; hold last zonal value up to top_m for entry simulations."""
+def extend_wind_for_entry(
+    alt_m: list[float],
+    vx: list[float],
+    vz: list[float],
+    sig: list[float],
+    top_m: float = 1_400_000.0,
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Above DWE top: smooth decay toward top_m (no flat extrapolation)."""
     if not alt_m:
-        return [0.0, top_m], [0.0, 0.0]
-    if alt_m[-1] < top_m - 1.0:
-        alt_m = alt_m + [float(top_m)]
-        vx = vx + [vx[-1]]
-    return alt_m, vx
+        return [0.0, top_m], [0.0, 0.0], [0.0, 0.0], [0.5, 0.5]
+    h0 = alt_m[-1]
+    if h0 >= top_m - 1.0:
+        return alt_m, vx, vz, sig
+    vxa = vx[-1]
+    vza = vz[-1]
+    siga = sig[-1]
+    n = 8
+    for j in range(1, n + 1):
+        frac = j / float(n)
+        h = h0 + frac * (top_m - h0)
+        decay = 1.0 - 0.36 * frac
+        alt_m.append(round(h, 3))
+        vx.append(round(vxa * decay, 5))
+        vz.append(round(vza * decay, 5))
+        sig.append(round(siga * (0.52 + 0.48 * (1.0 - frac)), 5))
+    return alt_m, vx, vz, sig
 
 
-def build_wind_json(alt_m: list[float], vx: list[float]) -> dict:
-    vz = [0.0] * len(alt_m)
+def build_wind_json(alt_m: list[float], vx: list[float], vz: list[float], sig: list[float]) -> dict:
     return {
-        "units": {"alt_m": "m", "v_x_mps": "m/s (zonal, +x)", "v_z_mps": "m/s (meridional, +z)"},
+        "units": {
+            "alt_m": "m",
+            "v_x_mps": "m/s (zonal, +x)",
+            "v_z_mps": "m/s (meridional, +z)",
+            "sigma_zonal_mps": "m/s (DWE formal 1σ zonal uncertainty)",
+        },
         "note": (
-            "Huygens DWE zonal wind (HP-SSA-DWE-2-3-DESCENT), ZONALWIND.TAB. "
-            "Above the top DWE altitude the last measured zonal value is held to 1400 km "
-            "to match the simulator entry altitude."
+            "Huygens DWE (HP-SSA-DWE-2-3-DESCENT) ZONALWIND.TAB: zonal speed and formal uncertainty; "
+            "meridional component is a sinusoidal fraction of zonal (WindConfig.meridional_*) for horizontal "
+            "shear. Above the DWE ceiling, zonal/meridional decay with altitude; σ tapers (weaker retrieval tie)."
         ),
         "sources": [
             "https://atmos.nmsu.edu/PDS/data/PDS4/Huygens/hpdwe_bundle/",
@@ -171,6 +203,7 @@ def build_wind_json(alt_m: list[float], vx: list[float]) -> dict:
         "alt_m": alt_m,
         "v_x_mps": vx,
         "v_z_mps": vz,
+        "sigma_zonal_mps": sig,
     }
 
 
@@ -219,9 +252,9 @@ def main() -> int:
     atm = build_titan_atm_json(merged)
     (REPO / "data" / "titan_atm.json").write_text(json.dumps(atm, indent=2) + "\n", encoding="utf-8")
 
-    wa, wx = parse_zonal_wind(wind_p)
-    wa, wx = extend_wind_for_entry(wa, wx)
-    wind = build_wind_json(wa, wx)
+    wa, wx, wz, sg = parse_zonal_wind(wind_p)
+    wa, wx, wz, sg = extend_wind_for_entry(wa, wx, wz, sg)
+    wind = build_wind_json(wa, wx, wz, sg)
     (REPO / "data" / "titan_wind_huygens.json").write_text(json.dumps(wind, indent=2) + "\n", encoding="utf-8")
 
     telem = parse_velocity(vel_p, stride=2)

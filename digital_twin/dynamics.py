@@ -295,8 +295,11 @@ def heatshield_skin_dTdt(
     q_abl = k_abl * (max(0.0, t - ta) ** p_abl) * math.sqrt(rho + 1e-30) * vm
 
     ka = float(cfg.k_ambient_1ps)
+    rho_r = max(1e-15, float(cfg.rho_ambient_ref_kg_m3))
+    gas_w = rho / (rho + rho_r)
+    kar = float(cfg.k_ambient_radiative_1ps)
     t_ext = float(t_ext_c)
-    return q_conv - q_abl - ka * (t - t_ext)
+    return q_conv - q_abl - ka * gas_w * (t - t_ext) - kar * (t - t_ext)
 
 
 def heatshield_skin_step(
@@ -325,12 +328,15 @@ def thermal_relaxation_step(
     *,
     t_skin_c: float,
     heatshield_attached: bool,
+    rho_kg_m3: float,
 ) -> None:
     """
     Internal bay temperature:
-      dT_int/dt = k_relax*(T_ext - T_int) + RTG/C
-                  + [if heatshield: k_couple*(T_skin - T_int)]
+      dT_int/dt = k_relax*g_w*(T_ext - T_int) + bus/C
+                  + [if heatshield: k_couple*max(0, T_skin - T_int)]
                   + [if not heatshield: k_qdyn*q_dyn]
+
+    g_w = rho/(rho+rho_knee): weak exchange in rarefied air (README-aligned).
     """
 
     dt = float(dt_s)
@@ -339,6 +345,9 @@ def thermal_relaxation_step(
 
     t_ext = float(t_ext_c)
     t_int = float(s.t_int_c)
+    rho = max(0.0, float(rho_kg_m3))
+    rk = max(0.0, float(cfg.thermal.k_relax_rho_knee_kg_m3))
+    gas_w = rho / (rho + rk) if rk > 0.0 else 1.0
     k_relax = float(cfg.thermal.k_relax_1ps)
 
     rtg_w = float(cfg.thermal.rtg_w)
@@ -346,9 +355,9 @@ def thermal_relaxation_step(
     k_qdyn = float(cfg.thermal.k_qdyn_c_per_s_per_pa)
     k_couple = float(cfg.thermal.k_heatshield_coupling_1ps)
 
-    dTdt = k_relax * (t_ext - t_int) + (rtg_w / heat_cap)
+    dTdt = k_relax * gas_w * (t_ext - t_int) + (rtg_w / heat_cap)
     if heatshield_attached:
-        dTdt += k_couple * (float(t_skin_c) - t_int)
+        dTdt += k_couple * max(0.0, float(t_skin_c) - t_int)
     else:
         dTdt += k_qdyn * float(q_dyn_pa)
     s.t_int_c = t_int + dTdt * dt

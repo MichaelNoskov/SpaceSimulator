@@ -21,7 +21,7 @@ from .dynamics import (
     thermal_relaxation_step,
 )
 from .models.atmosphere import AtmosphereTable, load_atmosphere_table, sample_atmosphere
-from .models.wind import wind_vec_mps as wind_vec_mps_fn
+from .models.wind import wind_mean_vec_mps, wind_sigma_zonal_mps
 from .world import WorldGen
 from .types import SurfaceType
 
@@ -67,6 +67,7 @@ class PhysicsModel:
         self._plot_action_log: Deque[Tuple[float, str, str]] = deque(maxlen=12000)
         self._tick_id = 0
         self._cache: dict[str, tuple[int, object]] = {}
+        self._physics_seed = int(seed) & 0xFFFFFFFF
         self._reset_state()
         self._target = self._make_target_at(0.0, 0.0)
         self._csv_file: Optional[TextIO] = None
@@ -79,6 +80,9 @@ class PhysicsModel:
     def _reset_state(self) -> None:
         # Simulation time from start (telemetry, phase logic).
         self._time_s = 0.0
+        self._wind_gust_x_mps = 0.0
+        self._wind_gust_z_mps = 0.0
+        self._rng = np.random.default_rng(self._physics_seed)
 
         # Absolute vertical position [m]: z_msl = terrain(x,z) + height above it.
         # Terrain from world.height_m_at; height above local surface = z_msl - terrain (see altitude_m).
@@ -132,7 +136,10 @@ class PhysicsModel:
         rho0 = float(self.atm_density_kg_m3)
         v0 = max(0.0, float(self.air_rel_speed_mps))
         dT0 = heatshield_skin_dTdt(t_ext0, t_ext0, rho0, v0, hcfg)
-        delta_stag = float(dT0) / max(1e-12, float(hcfg.k_ambient_1ps))
+        rho_r = max(1e-15, float(hcfg.rho_ambient_ref_kg_m3))
+        gas_w0 = rho0 / (rho0 + rho_r)
+        k_eff = float(hcfg.k_ambient_1ps) * gas_w0 + float(hcfg.k_ambient_radiative_1ps)
+        delta_stag = float(dT0) / max(1e-12, k_eff)
         self._heatshield_skin_temp_c = float(
             np.clip(t_ext0 + delta_stag, float(hcfg.t_min_c), float(hcfg.t_max_c))
         )
@@ -230,15 +237,15 @@ class PhysicsModel:
 
     @property
     def drogue_min_alt_m(self) -> float:
-        return 0_000.0
+        return float(self._cfg.drogue_floor_alt_m)
 
     @property
     def main_max_alt_m(self) -> float:
-        return 160_000.0
+        return float(self._cfg.parachute_main_max_deploy_alt_m)
 
     @property
     def chute_jettison_max_alt_m(self) -> float:
-        return 2_000.0
+        return float(self._cfg.parachute_jettison_max_alt_m)
 
     # -------------------------
     # target
@@ -512,23 +519,26 @@ class PhysicsModel:
 
     @property
     def can_drogue(self) -> bool:
-        return (not self.drogue_deployed) and (self.altitude_m > self.drogue_min_alt_m)
+        return (
+            (not self.drogue_deployed)
+            and self.heatshield_jettisoned
+            and (self.altitude_m > self.drogue_min_alt_m)
+        )
 
     @property
     def can_main(self) -> bool:
         return (not self.main_deployed) and self.drogue_deployed and (self.altitude_m < self.main_max_alt_m)
 
     def _science_elapsed_ok_for_chute_jettison(self) -> bool:
-        if not self.main_deployed:
-            return True
-        if self._t_main_deployed_s is None:
-            return True
+        if not self.main_deployed or self._t_main_deployed_s is None:
+            return False
         return (self.time_s - self._t_main_deployed_s) >= float(self._cfg.science_descent_min_s)
 
     @property
     def can_chute_jettison(self) -> bool:
         return (
             (not self.chute_jettisoned)
+            and self.main_deployed
             and (self.altitude_m < self.chute_jettison_max_alt_m)
             and self._science_elapsed_ok_for_chute_jettison()
         )
@@ -581,25 +591,45 @@ class PhysicsModel:
     # -------------------------
     @property
     def wind_x_mps(self) -> float:
-        cached = self._get_cached("wind")
+        cached = self._get_cached("wind_tot")
         if cached is not None:
             return float(cached[0])  # type: ignore[index]
-        w = wind_vec_mps_fn(self.altitude_m)
-        self._set_cached("wind", (float(w[0]), float(w[1])))
-        return float(w[0])
+        mx, mz = wind_mean_vec_mps(self.altitude_m)
+        tx = float(mx + self._wind_gust_x_mps)
+        tz = float(mz + self._wind_gust_z_mps)
+        self._set_cached("wind_tot", (tx, tz))
+        return tx
 
     @property
     def wind_z_mps(self) -> float:
-        cached = self._get_cached("wind")
+        cached = self._get_cached("wind_tot")
         if cached is not None:
             return float(cached[1])  # type: ignore[index]
-        w = wind_vec_mps_fn(self.altitude_m)
-        self._set_cached("wind", (float(w[0]), float(w[1])))
-        return float(w[1])
+        mx, mz = wind_mean_vec_mps(self.altitude_m)
+        tx = float(mx + self._wind_gust_x_mps)
+        tz = float(mz + self._wind_gust_z_mps)
+        self._set_cached("wind_tot", (tx, tz))
+        return tz
 
     def wind_vec_mps_at(self, h_m: float) -> tuple[float, float]:
-        w = wind_vec_mps_fn(float(h_m))
-        return float(w[0]), float(w[1])
+        """Mean wind at h plus current gust (column turbulence; same gust at all h)."""
+        mx, mz = wind_mean_vec_mps(float(h_m))
+        return float(mx + self._wind_gust_x_mps), float(mz + self._wind_gust_z_mps)
+
+    def _advance_wind_gust(self, dt: float) -> None:
+        wcfg = self._cfg.wind
+        if not wcfg.turbulence_enabled or dt <= 0.0:
+            return
+        sig_obs = float(wind_sigma_zonal_mps(float(self.altitude_m)))
+        sigma = max(float(wcfg.sigma_floor_mps), float(wcfg.sigma_scale_from_dwe) * sig_obs)
+        tau = max(1e-6, float(wcfg.ou_tau_s))
+        phi = math.exp(-dt / tau)
+        root = math.sqrt(max(0.0, 1.0 - phi * phi))
+        gx = float(self._wind_gust_x_mps)
+        gz = float(self._wind_gust_z_mps)
+        zfac = 0.68
+        self._wind_gust_x_mps = phi * gx + sigma * root * float(self._rng.standard_normal())
+        self._wind_gust_z_mps = phi * gz + zfac * sigma * root * float(self._rng.standard_normal())
 
     @property
     def atm_density_kg_m3(self) -> float:
@@ -867,6 +897,7 @@ class PhysicsModel:
 
         # new tick; derived caches must be recomputed against current state
         self._invalidate_cache()
+        self._advance_wind_gust(dt)
 
         # Explicit Euler: update position with velocity at step start, then v += a*dt.
         a_vert = float(self.accel_vert_mps2)
@@ -910,6 +941,7 @@ class PhysicsModel:
             dt_s=dt,
             t_skin_c=float(self._heatshield_skin_temp_c),
             heatshield_attached=hs_on,
+            rho_kg_m3=float(self.atm_density_kg_m3),
         )
 
         self._time_s = float(self.time_s + dt)
@@ -968,6 +1000,12 @@ class PhysicsModel:
             self._fail(f"Internal temperature below Tmin ({self.t_int_min_c:.0f}C)")
         if self.internal_temp_c > self.t_int_max_c:
             self._fail(f"Internal temperature above Tmax ({self.t_int_max_c:.0f}C)")
+
+        if not self._heatshield_jettisoned:
+            t_fail = float(self._cfg.heatshield_thermal.skin_failure_temp_c)
+            if float(self._heatshield_skin_temp_c) >= t_fail:
+                self._fail(f"Heatshield thermal failure (T_skin >= {t_fail:.0f} C)")
+                self._result = SimResult.FAILURE
 
         if self.fuel_kg <= 0.0 and self.altitude_m > 0.0 and self.engine_on:
             self._fail("Fuel exhausted above ground")

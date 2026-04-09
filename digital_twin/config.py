@@ -30,17 +30,22 @@ class ThermalConfig:
 
     With heatshield on: bays exchange with ambient and receive heat from the hot backface (T_skin).
     After jettison: direct aerodynamic heating via q_dyn is added again.
+
+    README: bays «обмен с наружной средой» + «нагрев от обшивки» — not full equilibration to T_ext
+    (Huygens-class insulation). Ambient exchange is ρ-gated; skin path heats bays only when T_skin > T_int.
     """
 
-    # Heat exchange with ambient gas (1/s): dT/dt += k_relax*(T_ext - T_int)
-    k_relax_1ps: float = 0.02
+    # Upper bound on (1/s) gas-side relaxation toward T_ext; scaled by ρ/(ρ+ρ_knee) like thin-air weak exchange.
+    k_relax_1ps: float = 5.5e-5
+    # Rarefaction knee [kg/m^3]: high altitude → almost no direct soak to free-stream T_ext.
+    k_relax_rho_knee_kg_m3: float = 0.12
 
-    # RTG (W) and effective heat capacity (J/°C): dT/dt += rtg_w / heat_capacity
-    rtg_w: float = 300.0
+    # Dissipated bus power (W; README does not fix the number) and effective heat capacity (J/°C).
+    rtg_w: float = 360.0
     heat_capacity_j_per_c: float = 50_000.0
 
-    # Coupling from heatshield skin while attached (1/s): dT/dt += k_couple * (T_skin - T_int)
-    k_heatshield_coupling_1ps: float = 3.8e-4
+    # Coupling from heatshield while attached (1/s): only heating when T_skin > T_int (insulation blocks cold back-soak).
+    k_heatshield_coupling_1ps: float = 9.0e-4
 
     # Direct aero heating to hull when heatshield is off: dT/dt += k_qdyn * q_dyn [Pa]
     k_qdyn_c_per_s_per_pa: float = 2e-6
@@ -64,7 +69,8 @@ class HeatshieldThermalConfig:
     """
 
     # Leading coefficient for the heating proxy (legacy name: originally ρ|v|³).
-    k_friction_rho_v3: float = 1.52e-9
+    # Tuned so peak entry in the sim reaches ~600–750 °C skin (glow + HUD), not cold soak.
+    k_friction_rho_v3: float = 5.78e-7
     rho_exponent: float = 1.0
     v_exponent: float = 3.0
     # ~1.0 for N2 ~95% + CH4 ~5% (data/titan_atm.json); adjust to compare to other atmospheres.
@@ -80,13 +86,30 @@ class HeatshieldThermalConfig:
     k_ablation_cooling: float = 2.8e-6
     t_ablation_onset_c: float = 80.0
     ablation_exponent: float = 1.15
-    # Newtonian cooling / equilibration toward free-stream temperature [1/s].
-    k_ambient_1ps: float = 0.03
+    # Gas-side cooling toward T_ext scales with ρ (thin air → weak molecular exchange).
+    k_ambient_1ps: float = 0.055
+    rho_ambient_ref_kg_m3: float = 0.018
+    # Weak always-on sink (radiation to cold sky / line-of-sight) so T_skin is not over-coupled in vacuum.
+    k_ambient_radiative_1ps: float = 0.006
     # Initial skin is computed at reset: T_ext + (friction heating rate)/k_ambient (see model._reset_state).
     t_init_c: float = -155.0  # unused; kept for dataclass compatibility
+    # Structural / ablator limit while heatshield is attached (mission failure if exceeded).
+    skin_failure_temp_c: float = 1350.0
     # Clamp (numerical / display); glow saturates below t_max.
     t_min_c: float = -230.0
     t_max_c: float = 2400.0
+
+
+@dataclass(frozen=True)
+class WindConfig:
+    """Mean wind from JSON; gusts are Ornstein–Uhlenbeck in PhysicsModel."""
+
+    turbulence_enabled: bool = True
+    ou_tau_s: float = 14.0
+    sigma_floor_mps: float = 0.3
+    sigma_scale_from_dwe: float = 1.85
+    meridional_wavelength_m: float = 55_000.0
+    meridional_strength: float = 0.19
 
 
 @dataclass(frozen=True)
@@ -101,6 +124,7 @@ class DigitalTwinConfig:
     engine: EngineConfig = EngineConfig()
     thermal: ThermalConfig = ThermalConfig()
     heatshield_thermal: HeatshieldThermalConfig = HeatshieldThermalConfig()
+    wind: WindConfig = WindConfig()
 
     # Heatshield jettison: Mach number limit (spec: below ~2–3 Mach).
     heatshield_jettison_max_mach: float = 2.5
@@ -110,6 +134,10 @@ class DigitalTwinConfig:
 
     # Minimum time under main chute before jettison (science descent ~2 h per spec).
     science_descent_min_s: float = 7200.0
+    # Parachute altitude gates [m] (Huygens-class; must match auto program assumptions).
+    parachute_main_max_deploy_alt_m: float = 160_000.0
+    parachute_jettison_max_alt_m: float = 2_000.0
+    drogue_floor_alt_m: float = 0.0
 
     # Terrain collision: penetration below surface [m].
     terrain_penetration_fail_m: float = 3.0

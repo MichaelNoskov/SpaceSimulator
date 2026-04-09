@@ -1859,10 +1859,10 @@ class UI:
 
         # Place center a bit below dial bottom (higher than previous midtop layout).
         center_y = int(dial1_c[1] + dial_r + (therm_h * 0.36))
-        dial_span = max(1, dial2_c[0] - dial1_c[0])
-        therm_inset = int(min(26 * self.ui_scale, max(6, dial_span * 0.11)))
-        therm1.center = (dial1_c[0] + therm_inset, center_y)
-        therm2.center = (dial2_c[0] - therm_inset, center_y)
+        # Center each gauge under its dial; middle gauge between dials — no horizontal inset
+        # (inset pulled the outer two inward and overlapped the heatshield thermometer).
+        therm1.center = (dial1_c[0], center_y)
+        therm2.center = (dial2_c[0], center_y)
         therm_hs_w = int(np.clip(56 * self.ui_scale, 50 * self.ui_scale, 64 * self.ui_scale))
         therm_hs = pygame.Rect(0, 0, therm_hs_w, therm_h)
         therm_hs.center = ((dial1_c[0] + dial2_c[0]) // 2, center_y)

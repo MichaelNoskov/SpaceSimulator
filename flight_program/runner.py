@@ -8,15 +8,16 @@ from control.controller import Controller
 from digital_twin.model import PhysicsModel, SimResult
 
 DEFAULT_SCRIPT = """def tick(sim, ap):
+    # Safety gates are in sim.can_* (Mach, altitude, heatshield before drogue, science hold).
     if sim.can_heatshield_jettison:
         ap.request_heatshield_jettison()
-    if sim.can_drogue and (sim.altitude_m > 180_000.0):
+    if sim.can_drogue:
         ap.request_drogue()
-    if sim.can_main and (sim.altitude_m < 160_000.0):
+    if sim.can_main:
         ap.request_main()
-    if sim.can_chute_jettison and (sim.altitude_m < 2_000.0):
+    if sim.can_chute_jettison:
         ap.request_chute_jettison()
-    if sim.altitude_m < 2_000.0 and sim.chute_jettisoned:
+    if sim.altitude_m < sim.parachute_jettison_max_alt_m and sim.chute_jettisoned:
         ap.set_engine(True)
         target_v = -20.0 if sim.altitude_m > 200.0 else -4.0
         error = target_v - sim.vertical_speed_mps
@@ -26,6 +27,7 @@ DEFAULT_SCRIPT = """def tick(sim, ap):
 
 # Full identifiers for hint panel and Tab completion (longest first helps some UIs; sorted for display)
 SIM_API_COMPLETIONS: tuple[str, ...] = (
+    "sim.parachute_jettison_max_alt_m",
     "sim.altitude_m",
     "sim.atm_pressure_bar",
     "sim.can_chute_jettison",
@@ -196,6 +198,10 @@ class SimView:
     @property
     def can_chute_jettison(self) -> bool:
         return bool(self._m.can_chute_jettison)
+
+    @property
+    def parachute_jettison_max_alt_m(self) -> float:
+        return float(self._m.chute_jettison_max_alt_m)
 
     @property
     def fuel_kg(self) -> float:

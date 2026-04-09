@@ -36,12 +36,12 @@ Physics lives in `digital_twin`; Pygame handles the world and cockpit so you can
 | **Atmosphere** | Titan vertical profile in `data/titan_atm.json` (Huygens HASI L4, NASA PDS) |
 | **Gas state** | Bulk $\rho$, $T$, $P$ vs altitude in the equations of motion |
 | **Aerodynamics** | Quadratic drag; parachutes and heatshield jettison change $C_d$ and area |
-| **Wind** | Huygens DWE zonal wind in `data/titan_wind_huygens.json` (NASA PDS); shifts air-relative velocity |
-| **Thermal** | **Skin**: reduced-order entry model — $\rho$–$|v_{\mathrm{rel}}|$ heating with a **rarefaction knee**, **pyrolysis blowing** (BL blockage), and **ablative cooling**; relaxes toward $T_{\mathrm{ext}}$; **bays** couple to the skin while the heatshield is on, else direct $q_{\mathrm{dyn}}$ heating |
+| **Wind** | **Huygens DWE** zonal wind plus formal σ from `ZONALWIND.TAB`, altitude-varying meridional component, smooth decay above the DWE top; **OU turbulence** scaled by σ and `WindConfig`, applied in `PhysicsModel` |
+| **Thermal** | **Skin** (`HeatshieldThermalConfig`): reduced-order $dT_{\mathrm{skin}}/dt$ — convective proxy $\propto \rho^{\alpha}|v_{\mathrm{rel}}|^{\beta}$, rarefaction $\rho/(\rho+\rho_{\mathrm{knee}})$, blowing, ablative cooling, and relaxation toward $T_{\mathrm{ext}}(h)$ (gas coupling $\propto \rho/(\rho+\rho_{\mathrm{ref}})$ plus a weak radiative term); the leading heating coefficient is **tuned in-sim** so a nominal entry shows glow and HUD readings; exceeding a **skin temperature limit** fails the mission. **Bays** (`ThermalConfig`): exchange with the atmosphere is **weak** and **$\rho$-weighted** (little “soak” to $T_{\mathrm{ext}}$ in rarefied air); constant modeled bus power; **with heatshield attached**, heat from the shell uses **one-way coupling** $\max(0, T_{\mathrm{skin}}-T_{\mathrm{int}})$; **after jettison**, hull heating from dynamic pressure $q_{\mathrm{dyn}}$ |
 | **Scene** | Clouds and haze in the visualization |
 | **Propulsion** | Thrust and fuel consumption |
 | **Surface** | Procedural terrain, land and liquid regions |
-| **Outcome** | Success / failure: overload, temperature, fuel, hard landing, surface-type mismatch vs target, terrain collision |
+| **Outcome** | Success / failure: overload, bay temperature, **heatshield skin overheat** (while heatshield still attached), fuel, hard landing, surface-type mismatch vs target, terrain collision |
 
 ---
 
@@ -118,8 +118,9 @@ The UI is an **operator console**: instruments show the flight state; levers and
 
 ### Levers (heatshield and parachutes)
 
-- **Heatshield jettison** is allowed when **Mach** $M = v_{\mathrm{rel}} / a$ falls below the limit. The speed of sound $a$ uses the ideal-gas model (see [Key formulas](#key-formulas)). Blocked while hypersonic.
-- **Drogue**, then **main** chute, within altitude gates; **chute jettison** near the ground only after a minimum **science descent** time under the main canopy (default 2 h simulation time; time warp shortens wall-clock wait).
+- **Heatshield jettison** when **Mach** $M = v_{\mathrm{rel}} / a$ is below the limit (default $M < 2.5$, `heatshield_jettison_max_mach` in `digital_twin/config.py`). Blocked while hypersonic.
+- **Drogue** only **after** heatshield jettison. **Main** chute when $h < 160\ \mathrm{km}$ and drogue is already deployed. **Chute jettison** when $h < 2\ \mathrm{km}$, only with main deployed and after the **science descent** hold under the main canopy (default 2 h model time, `science_descent_min_s`). Altitude gates: `parachute_main_max_deploy_alt_m`, `parachute_jettison_max_alt_m` in `config`.
+- Default **Auto** issues `request_*` when the matching `can_*` is true (`DEFAULT_SCRIPT` in `flight_program/runner.py`).
 - A **green lamp** on a lever means the action is **currently allowed** by the safety rules.
 
 ### Engine
@@ -216,6 +217,45 @@ $$
 \rho = \rho(h),\qquad T = T(h),\qquad P = P(h)
 $$
 
+### Thermal: heatshield skin temperature
+
+Until the heatshield is jettisoned, $T_{\mathrm{skin}}$ is advanced with an explicit time step; see `heatshield_skin_dTdt` in `digital_twin/dynamics.py`. The model includes:
+
+- **Heating** — leading term $\propto k_{\mathrm{friction}}\,\rho^{\alpha}|v_{\mathrm{rel}}|^{\beta}$ with **rarefaction** $\rho/(\rho+\rho_{\mathrm{knee}})$ so heating weakens in very thin air.
+- **Blowing / pyrolysis** — reduces convective heating when $T_{\mathrm{skin}}$ is high (boundary-layer proxy).
+- **Ablative cooling** — extra enthalpy loss above an onset temperature (no separate mass ODE).
+- **Cooling toward $T_{\mathrm{ext}}(h)$** — **gas-side** exchange scaled by $\rho/(\rho+\rho_{\mathrm{ref}})$ plus a **weak radiative** sink to cold sky (avoids over-coupling $T_{\mathrm{skin}}$ to gas in near-vacuum).
+
+The coefficient $k_{\mathrm{friction}}$ in `HeatshieldThermalConfig` is **tuned for this simulator** (reduced-order model, not a direct reconstruction of Huygens flux). Defaults $\alpha=1$, $\beta=3$ keep the legacy “$\rho|v|^3$” naming.
+
+If $T_{\mathrm{skin}}$ exceeds a **structural/ablator cap** (`skin_failure_temp_c`) **while the heatshield is still on**, the mission **fails** — a gameplay integrity limit, not a HASI table value.
+
+### Thermal: internal bay temperature
+
+Rate of change $T_{\mathrm{int}}$ (`thermal_relaxation_step`):
+
+$$
+\frac{dT_{\mathrm{int}}}{dt}
+  = k_{\mathrm{relax}}\,g_{\rho}\,\bigl(T_{\mathrm{ext}}-T_{\mathrm{int}}\bigr)
+  + \frac{P_{\mathrm{bus}}}{C}
+  + \begin{cases}
+      k_{\mathrm{couple}}\,\max\bigl(0,\,T_{\mathrm{skin}}-T_{\mathrm{int}}\bigr) & \text{heatshield on} \\[0.4em]
+      k_{q}\,q_{\mathrm{dyn}} & \text{after jettison}
+    \end{cases}
+$$
+
+$$
+g_{\rho} = \frac{\rho}{\rho+\rho_{\mathrm{knee,relax}}}
+$$
+
+**Rationale:** for the educational scenario, bays must **not** instantly match free-stream temperature: insulation and weak exchange at altitude are represented by a **small** $k_{\mathrm{relax}}$ and the factor $g_{\rho}$ — in rarefied air, direct relaxation to $T_{\mathrm{ext}}$ is almost off. $P_{\mathrm{bus}}$ is total modeled bus dissipation (config field `rtg_w`; not tied to a real RTG on Huygens). **Skin coupling is one-way:** only heating when the shell is **hotter** than the bays; a cold outer surface does **not** pull $T_{\mathrm{int}}$ down through the same term (MLI / tent simplification). After jettison, skin coupling is removed; exchange with air, bus power, and **aerodynamic** hull heating $\propto q_{\mathrm{dyn}}$ remain.
+
+Constants live in `ThermalConfig` (`digital_twin/config.py`).
+
+### Entry glow visualization
+
+Shell tint and additive glow depend on $T_{\mathrm{skin}}$; the char/dynamic-pressure blend uses **$|\mathbf{v}_{\mathrm{rel}}|$**, consistent with the aero path, not vertical speed alone.
+
 ---
 
 ## Landing phases
@@ -258,7 +298,7 @@ A Huygens-like descent chain in the simulator’s terms.
 | File | Role |
 |------|------|
 | `data/titan_atm.json` | Huygens HASI L4 atmosphere (P, T, ρ; entry segment: ideal-gas ρ from P and T). Source TAB: `data/nasa_pds/hasi_profiles/` |
-| `data/titan_wind_huygens.json` | Huygens DWE zonal wind (`ZONALWIND.TAB`). Above ~144 km the last measured zonal value is held to 1400 km for the scenario entry altitude |
+| `data/titan_wind_huygens.json` | DWE: zonal, σ (TAB col. 4), meridional model; above DWE top, smooth decay to 1400 km (`scripts/parse_pds_titan.py`) |
 | `data/huygens_velocity_telemetry.json` | Huygens HASI L4 probe speed (`HASI_L4_VELOCITY_PROFILE.TAB`). Mission record; simulator state is integrated separately |
 | `data/nasa_pds/` | NASA/JPL/PDS archive: PDFs and TAB/LBL; see `data/nasa_pds/README_SOURCES.md` |
 | `data/surface_map.meta.json` | Metadata and references for the surface mask |

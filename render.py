@@ -589,8 +589,8 @@ class Renderer:
 
     def _heatshield_color(self, model: PhysicsModel) -> tuple[int, int, int]:
         # Char from dynamic-pressure proxy; incandescent tint from thermal skin model.
-        v = abs(float(model.vertical_speed_mps))
-        q = float(model.atm_density_kg_m3) * (v * v)  # proxy
+        v = float(model.air_rel_speed_mps)
+        q = float(model.atm_density_kg_m3) * (v * v)  # proxy (same |v_rel| family as skin heating)
         t_char = float(np.clip((q - 50_000.0) / 450_000.0, 0.0, 1.0))
         t_char = t_char * t_char
         base = np.array([220, 205, 190], dtype=float)
@@ -608,7 +608,8 @@ class Renderer:
         if model.heatshield_jettisoned:
             return 0.0
         t_skin = float(model.heatshield_skin_temp_c)
-        return float(np.clip((t_skin - 520.0) / 900.0, 0.0, 1.0))
+        # Onset ~400 °C so plausible peak (~650 °C in nominal entry) reads clearly.
+        return float(np.clip((t_skin - 400.0) / 650.0, 0.0, 1.0))
 
     def _draw_probe(self, screen: pygame.Surface, rect: pygame.Rect, model: PhysicsModel) -> None:
         scale = self._probe_scale(model)
