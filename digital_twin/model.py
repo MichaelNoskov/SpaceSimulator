@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -69,6 +69,20 @@ class PhysicsModel:
         self._tick_id = 0
         self._cache: dict[str, tuple[int, object]] = {}
         self._physics_seed = int(seed) & 0xFFFFFFFF
+        # Mission start parameters (editable via UI before / between flights).
+        self._mission_entry_start_altitude_m = float(self._cfg.body.entry_start_altitude_m)
+        self._mission_entry_speed_mps = float(self._cfg.body.entry_speed_mps)
+        self._mission_fuel_kg = 50.0
+        self._mission_dry_mass_kg = 270.0
+        self._mission_heatshield_mass_kg = 30.0
+        self._mission_a_ref_m2 = 2.5
+        self._mission_cd_base = 1.2
+        self._mission_drogue_area_m2 = float(self._cfg.drogue_area_m2)
+        self._mission_drogue_cd = float(self._cfg.drogue_cd)
+        self._mission_main_chute_area_m2 = float(self._cfg.main_chute_area_m2)
+        self._mission_main_chute_cd = float(self._cfg.main_chute_cd)
+        self._mission_engine_t_max_n = float(self._cfg.engine.t_max_n)
+        self._mission_engine_isp_s = float(self._cfg.engine.isp_s)
         self._reset_state()
         tx, tz = self._nearest_land_point_m(0.0, 0.0)
         self._target = self._make_target_at(tx, tz)
@@ -89,9 +103,10 @@ class PhysicsModel:
         # Absolute vertical position [m]: z_msl = terrain(x,z) + height above it.
         # Terrain from world.height_m_at; height above local surface = z_msl - terrain (see altitude_m).
         terrain0 = float(self._world.height_m_at(0.0, 0.0))
-        self._z_msl_m = float(self._cfg.body.entry_start_altitude_m) + terrain0
+        self._z_msl_m = float(self._mission_entry_start_altitude_m) + terrain0
 
-        vv0, vx0, vz0 = entry_velocity_inertial_mps(self._cfg.body)
+        body_entry = replace(self._cfg.body, entry_speed_mps=float(self._mission_entry_speed_mps))
+        vv0, vx0, vz0 = entry_velocity_inertial_mps(body_entry)
         self._vertical_speed_mps = vv0
         self._speed_x_mps = vx0
         self._speed_z_mps = vz0
@@ -101,19 +116,19 @@ class PhysicsModel:
         self._pos_z_m = 0.0
 
         # Dry mass [kg]; drives m_total_kg and accelerations.
-        self._dry_mass_kg = 270.0
+        self._dry_mass_kg = float(self._mission_dry_mass_kg)
 
         # Heatshield mass [kg]; removed from dry_mass_kg on jettison.
-        self._heatshield_mass_kg = 30.0
+        self._heatshield_mass_kg = float(self._mission_heatshield_mass_kg)
 
         # Fuel mass [kg]; limits thrust and total mass.
-        self._fuel_kg = 50.0
+        self._fuel_kg = float(self._mission_fuel_kg)
 
         # Base drag coefficient (no chutes/jettison); used for drag.
-        self._cd_base = 1.2
+        self._cd_base = float(self._mission_cd_base)
 
         # Reference area [m^2]; modified by chutes/heatshield via derived getters.
-        self._a_ref_m2 = 2.5
+        self._a_ref_m2 = float(self._mission_a_ref_m2)
 
         # System flags: affect aero and which actions are allowed next.
         self._heatshield_jettisoned = False
@@ -148,6 +163,8 @@ class PhysicsModel:
         self._result = SimResult.RUNNING
         self._failed = False
         self._failure_reasons: list[str] = []
+        self._failure_reason_keys_seen: set[str] = set()
+        self._landing_finished: bool = False
         self._water_landed: bool = False
         self._t_main_deployed_s: Optional[float] = None
         # Snapshot at step() entry; soft landing uses these (before Euler integration).
@@ -164,6 +181,159 @@ class PhysicsModel:
         tx, tz = self._nearest_land_point_m(0.0, 0.0)
         self._target = self._make_target_at(tx, tz)
         self._invalidate_cache()
+
+    @property
+    def mission_entry_start_altitude_m(self) -> float:
+        """MSL entry altitude above local terrain anchor [m] (mission setup)."""
+        return float(self._mission_entry_start_altitude_m)
+
+    @property
+    def mission_entry_speed_mps(self) -> float:
+        """Entry speed magnitude used for initial velocity vector [m/s]."""
+        return float(self._mission_entry_speed_mps)
+
+    @property
+    def mission_fuel_kg(self) -> float:
+        """Initial fuel load for the next / current reset [kg]."""
+        return float(self._mission_fuel_kg)
+
+    @property
+    def mission_dry_mass_kg(self) -> float:
+        return float(self._mission_dry_mass_kg)
+
+    @property
+    def mission_heatshield_mass_kg(self) -> float:
+        return float(self._mission_heatshield_mass_kg)
+
+    @property
+    def mission_a_ref_m2(self) -> float:
+        return float(self._mission_a_ref_m2)
+
+    @property
+    def mission_cd_base(self) -> float:
+        return float(self._mission_cd_base)
+
+    @property
+    def mission_drogue_area_m2(self) -> float:
+        return float(self._mission_drogue_area_m2)
+
+    @property
+    def mission_drogue_cd(self) -> float:
+        return float(self._mission_drogue_cd)
+
+    @property
+    def mission_main_chute_area_m2(self) -> float:
+        return float(self._mission_main_chute_area_m2)
+
+    @property
+    def mission_main_chute_cd(self) -> float:
+        return float(self._mission_main_chute_cd)
+
+    @property
+    def mission_engine_t_max_n(self) -> float:
+        return float(self._mission_engine_t_max_n)
+
+    @property
+    def mission_engine_isp_s(self) -> float:
+        return float(self._mission_engine_isp_s)
+
+    def set_mission_parameters(
+        self,
+        entry_start_altitude_m: float,
+        entry_speed_mps: float,
+        fuel_kg: float,
+        dry_mass_kg: float,
+        heatshield_mass_kg: float,
+        a_ref_m2: float,
+        cd_base: float,
+        drogue_area_m2: float,
+        drogue_cd: float,
+        main_chute_area_m2: float,
+        main_chute_cd: float,
+        engine_t_max_n: float,
+        engine_isp_s: float,
+    ) -> None:
+        """
+        Store vehicle + entry conditions applied on the next `reset()`.
+
+        Altitude: height above terrain at origin (same convention as BodyConfig.entry_start_altitude_m).
+        Speed: magnitude of entry velocity; direction follows entry_flight_path_angle_from_horizontal_deg.
+        """
+        h = float(entry_start_altitude_m)
+        v = float(entry_speed_mps)
+        f = float(fuel_kg)
+        d = float(dry_mass_kg)
+        hs = float(heatshield_mass_kg)
+        ar = float(a_ref_m2)
+        cd0 = float(cd_base)
+        da = float(drogue_area_m2)
+        dcd = float(drogue_cd)
+        ma = float(main_chute_area_m2)
+        mcd = float(main_chute_cd)
+        tmax = float(engine_t_max_n)
+        isp = float(engine_isp_s)
+        if not (30_000.0 <= h <= 3_000_000.0):
+            raise ValueError("entry altitude must be between 30 km and 3000 km (MSL-style)")
+        if not (500.0 <= v <= 12_000.0):
+            raise ValueError("entry speed must be between 500 m/s and 12 km/s")
+        if not (0.0 <= f <= 500.0):
+            raise ValueError("fuel must be between 0 and 500 kg")
+        if not (10.0 <= d <= 5000.0):
+            raise ValueError("dry mass must be between 10 and 5000 kg")
+        if not (0.0 <= hs <= d):
+            raise ValueError("heatshield mass must be between 0 and dry mass")
+        if not (0.2 <= ar <= 80.0):
+            raise ValueError("reference area must be between 0.2 and 80 m²")
+        if not (0.1 <= cd0 <= 5.0):
+            raise ValueError("base Cd must be between 0.1 and 5")
+        if not (0.5 <= da <= 200.0):
+            raise ValueError("drogue area must be between 0.5 and 200 m²")
+        if not (0.3 <= dcd <= 5.0):
+            raise ValueError("drogue Cd must be between 0.3 and 5")
+        if not (1.0 <= ma <= 600.0):
+            raise ValueError("main chute area must be between 1 and 600 m²")
+        if not (0.3 <= mcd <= 5.0):
+            raise ValueError("main chute Cd must be between 0.3 and 5")
+        if not (0.0 <= tmax <= 80_000.0):
+            raise ValueError("engine max thrust must be between 0 and 80000 N")
+        if not (1.0 <= isp <= 600.0):
+            raise ValueError("engine Isp must be between 1 and 600 s")
+        self._mission_entry_start_altitude_m = h
+        self._mission_entry_speed_mps = v
+        self._mission_fuel_kg = f
+        self._mission_dry_mass_kg = d
+        self._mission_heatshield_mass_kg = hs
+        self._mission_a_ref_m2 = ar
+        self._mission_cd_base = cd0
+        self._mission_drogue_area_m2 = da
+        self._mission_drogue_cd = dcd
+        self._mission_main_chute_area_m2 = ma
+        self._mission_main_chute_cd = mcd
+        self._mission_engine_t_max_n = tmax
+        self._mission_engine_isp_s = isp
+
+    def set_mission_start_params(
+        self,
+        entry_start_altitude_m: float,
+        entry_speed_mps: float,
+        fuel_kg: float,
+    ) -> None:
+        """Backward-compatible wrapper: only changes entry altitude/speed/fuel."""
+        self.set_mission_parameters(
+            entry_start_altitude_m,
+            entry_speed_mps,
+            fuel_kg,
+            self._mission_dry_mass_kg,
+            self._mission_heatshield_mass_kg,
+            self._mission_a_ref_m2,
+            self._mission_cd_base,
+            self._mission_drogue_area_m2,
+            self._mission_drogue_cd,
+            self._mission_main_chute_area_m2,
+            self._mission_main_chute_cd,
+            self._mission_engine_t_max_n,
+            self._mission_engine_isp_s,
+        )
 
     def _nearest_land_point_m(self, x0: float, z0: float) -> tuple[float, float]:
         if self._world.surface_type_at(float(x0), float(z0)) != SurfaceType.LAKE:
@@ -212,11 +382,11 @@ class PhysicsModel:
 
     @property
     def engine_tmax_n(self) -> float:
-        return float(self._cfg.engine.t_max_n)
+        return float(self._mission_engine_t_max_n)
 
     @property
     def engine_isp_s(self) -> float:
-        return float(self._cfg.engine.isp_s)
+        return float(self._mission_engine_isp_s)
 
     @property
     def rho_surface_kg_m3(self) -> float:
@@ -526,7 +696,17 @@ class PhysicsModel:
 
     @property
     def failure_reason(self) -> str:
+        """Last recorded failure category id (see `failure_reasons`); empty if none."""
         return self._failure_reasons[-1] if self._failure_reasons else ""
+
+    @property
+    def failure_reasons(self) -> tuple[str, ...]:
+        """Unique failure category ids, e.g. ``overload``, ``t_int_max`` (UI translates)."""
+        return tuple(self._failure_reasons)
+
+    @staticmethod
+    def _normalize_failure_reason_text(reason: str) -> str:
+        return " ".join(str(reason).split())
 
     # -------------------------
     # commands / events + validation
@@ -736,6 +916,10 @@ class PhysicsModel:
         s = _S()
         s.cd_base = self.cd_base
         s.a_ref_m2 = self.a_ref_m2
+        s.drogue_area_m2 = float(self._mission_drogue_area_m2)
+        s.drogue_cd = float(self._mission_drogue_cd)
+        s.main_chute_area_m2 = float(self._mission_main_chute_area_m2)
+        s.main_chute_cd = float(self._mission_main_chute_cd)
         s.drogue_deployed = self.drogue_deployed
         s.main_deployed = self.main_deployed
         s.chute_jettisoned = self.chute_jettisoned
@@ -913,7 +1097,7 @@ class PhysicsModel:
 
     @property
     def phase(self) -> str:
-        if self.result != SimResult.RUNNING:
+        if self.result == SimResult.SUCCESS or self._landing_finished:
             return "end"
         if not self.heatshield_jettisoned:
             return "entry"
@@ -933,7 +1117,8 @@ class PhysicsModel:
     # simulation step
     # -------------------------
     def step(self, dt_s: float) -> None:
-        if self.result in (SimResult.SUCCESS, SimResult.FAILURE):
+        # Touchdown (success or failure): no further physics integration.
+        if self._landing_finished:
             return
 
         dt = float(dt_s)
@@ -966,7 +1151,12 @@ class PhysicsModel:
         self._speed_z_mps = float(vz + a_z * dt)
 
         # fuel burn (based on thrust)
-        dm = fuel_burn_kg(self._cfg, thrust_n=float(self.thrust_n), dt_s=dt)
+        dm = fuel_burn_kg(
+            self._cfg,
+            thrust_n=float(self.thrust_n),
+            dt_s=dt,
+            isp_s=float(self._mission_engine_isp_s),
+        )
         if dm > 0.0:
             self._fuel_kg = max(0.0, float(self.fuel_kg) - float(dm))
             if self._fuel_kg <= 0.0:
@@ -1018,8 +1208,49 @@ class PhysicsModel:
 
     def _fail(self, reason: str) -> None:
         self._failed = True
-        if (not self._failure_reasons) or (self._failure_reasons[-1] != reason):
-            self._failure_reasons.append(reason)
+        norm = self._normalize_failure_reason_text(reason)
+        key = self._failure_reason_semantic_key(norm)
+        if key in self._failure_reason_keys_seen:
+            if self._result == SimResult.RUNNING:
+                self._result = SimResult.FAILURE
+            return
+        self._failure_reason_keys_seen.add(key)
+        self._failure_reasons.append(key)
+        # Failure is non-terminal in flight; after touchdown, physics stops (see _landing_finished).
+        if self._result == SimResult.RUNNING:
+            self._result = SimResult.FAILURE
+
+    @staticmethod
+    def _failure_reason_semantic_key(reason: str) -> str:
+        """One key per fault *category* (no degrees, no g margin). Unknown text → key = normalized string."""
+        s = PhysicsModel._normalize_failure_reason_text(reason)
+        sl = s.lower()
+        if sl in (
+            "overload",
+            "g-load limit exceeded",
+            "g_load",
+        ) or sl.startswith("overload"):
+            return "overload"
+        if sl in ("t_int_min", "internal_temperature_min") or "internal temperature below" in sl:
+            return "t_int_min"
+        if sl in ("t_int_max", "internal_temperature_max") or "internal temperature above" in sl:
+            return "t_int_max"
+        if sl in ("heatshield", "hs_thermal") or "heatshield thermal failure" in sl:
+            return "hs_thermal"
+        if sl in ("hard_landing",) or sl.startswith("hard landing"):
+            return "hard_landing"
+        if sl in ("wrong_site",) or "wrong landing site" in sl:
+            return "wrong_site"
+        if sl in ("fuel",) or sl.startswith("fuel exhausted"):
+            return "fuel"
+        if sl in ("terrain",) or sl == "terrain collision":
+            return "terrain"
+        return s
+
+    @property
+    def landing_finished(self) -> bool:
+        """True after any touchdown handling (success or failure on surface)."""
+        return self._landing_finished
 
     @property
     def telemetry_history(self) -> list[dict[str, float]]:
@@ -1042,13 +1273,13 @@ class PhysicsModel:
         self._vertical_speed_mps = 0.0
         self._speed_x_mps = 0.0
         self._speed_z_mps = 0.0
+        self._landing_finished = True
 
     def _check_end_conditions(self) -> None:
         # Terrain / landing first: touchdown can spike g_load; overload must not mask a soft landing.
         pen = float(self._cfg.terrain_penetration_fail_m)
         if self.altitude_m < -pen:
-            self._fail("Terrain collision")
-            self._result = SimResult.FAILURE
+            self._fail("terrain")
             if self.surface_type_under_probe == SurfaceType.LAKE:
                 self._water_landed = True
             self._land_cleanup_touchdown()
@@ -1063,8 +1294,7 @@ class PhysicsModel:
 
             # Catastrophic impact: post-step speeds (same frame as touchdown).
             if v_vert >= v_crit_v or v_hor >= v_crit_h:
-                self._fail("Terrain collision")
-                self._result = SimResult.FAILURE
+                self._fail("terrain")
                 if surf == SurfaceType.LAKE:
                     self._water_landed = True
                 self._land_cleanup_touchdown()
@@ -1084,17 +1314,15 @@ class PhysicsModel:
             ok_hor = v_hor_soft <= self.touchdown_v_hor_mps + tol
             if ok_vert and ok_hor:
                 if surf != self._target.surface_type:
-                    self._fail("Wrong landing site (surface mismatch)")
-                    self._result = SimResult.FAILURE
+                    self._fail("wrong_site")
                 elif self.failed:
-                    # Prior fault (e.g. overload): mission stays failed, no false "hard landing" label.
-                    self._result = SimResult.FAILURE
+                    # Prior fault (e.g. overload): cannot upgrade to success.
+                    pass
                 else:
                     self._result = SimResult.SUCCESS
             else:
                 # Always record hard landing when soft limits are exceeded, even if _failed was already set.
-                self._fail(f"Hard landing ({surf.value})")
-                self._result = SimResult.FAILURE
+                self._fail("hard_landing")
 
             if surf == SurfaceType.LAKE:
                 self._water_landed = True
@@ -1103,21 +1331,20 @@ class PhysicsModel:
             return
 
         if self.g_load > self.max_overload_g:
-            self._fail(f"Overload > {self.max_overload_g:g}g")
+            self._fail("overload")
 
         if self.internal_temp_c < self.t_int_min_c:
-            self._fail(f"Internal temperature below Tmin ({self.t_int_min_c:.0f}C)")
+            self._fail("t_int_min")
         if self.internal_temp_c > self.t_int_max_c:
-            self._fail(f"Internal temperature above Tmax ({self.t_int_max_c:.0f}C)")
+            self._fail("t_int_max")
 
         if not self._heatshield_jettisoned:
             t_fail = float(self._cfg.heatshield_thermal.skin_failure_temp_c)
             if float(self._heatshield_skin_temp_c) >= t_fail:
-                self._fail(f"Heatshield thermal failure (T_skin >= {t_fail:.0f} C)")
-                self._result = SimResult.FAILURE
+                self._fail("hs_thermal")
 
         if self.fuel_kg <= 0.0 and self.altitude_m > 0.0 and self.engine_on:
-            self._fail("Fuel exhausted above ground")
+            self._fail("fuel")
 
 
 class _ThermalStateProxy:

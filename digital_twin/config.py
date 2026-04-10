@@ -168,6 +168,12 @@ class DigitalTwinConfig:
     parachute_jettison_max_alt_m: float = 2_000.0
     drogue_floor_alt_m: float = 0.0
 
+    # Parachute reference geometry (also overridable per mission in UI); used by `aero_params_for_state`.
+    drogue_area_m2: float = 5.3
+    drogue_cd: float = 1.6
+    main_chute_area_m2: float = 54.0
+    main_chute_cd: float = 1.7
+
     # Terrain collision: penetration below surface [m].
     terrain_penetration_fail_m: float = 3.0
     # High-energy impact thresholds vs surface (separate from hard landing).

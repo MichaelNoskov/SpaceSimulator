@@ -58,12 +58,12 @@ def aero_params_for_state(s: SimState) -> AeroParams:
 
     # Parachutes increase reference area and Cd.
     if s.drogue_deployed and not s.chute_jettisoned:
-        area = 5.3
-        cd = 1.6
+        area = float(s.drogue_area_m2)
+        cd = float(s.drogue_cd)
 
     if s.main_deployed and not s.chute_jettisoned:
-        area = 54.0
-        cd = 1.7
+        area = float(s.main_chute_area_m2)
+        cd = float(s.main_chute_cd)
 
     # Heatshield changes effective shape.
     if s.heatshield_jettisoned:
@@ -94,7 +94,7 @@ def thrust_force_n(cfg: DigitalTwinConfig, s: SimState) -> float:
     return float(cfg.engine.t_max_n) * float(np.clip(s.throttle, 0.0, 1.0))
 
 
-def fuel_burn_kg(cfg: DigitalTwinConfig, thrust_n: float, dt_s: float) -> float:
+def fuel_burn_kg(cfg: DigitalTwinConfig, thrust_n: float, dt_s: float, isp_s: float | None = None) -> float:
     """
     Fuel mass burned over dt.
 
@@ -111,7 +111,8 @@ def fuel_burn_kg(cfg: DigitalTwinConfig, thrust_n: float, dt_s: float) -> float:
 
     if thrust_n == 0.0 or dt_s <= 0.0:
         return 0.0
-    mdot = abs(float(thrust_n)) / (float(cfg.engine.isp_s) * float(cfg.engine.g0_mps2))
+    isp = float(cfg.engine.isp_s if isp_s is None else isp_s)
+    mdot = abs(float(thrust_n)) / (isp * float(cfg.engine.g0_mps2))
     return float(mdot * dt_s)
 
 

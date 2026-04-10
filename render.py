@@ -228,6 +228,7 @@ class Renderer:
             ui._draw_modal_overlays(screen, controller)  # type: ignore[arg-type]
             ui.draw_mission_report_modal(screen, controller)  # type: ignore[arg-type]
             ui.draw_pause_control(screen)  # type: ignore[arg-type]
+            ui.draw_failure_outcome(screen, controller)  # type: ignore[arg-type]
         pygame.display.flip()
 
     def draw_minimap(self, screen: pygame.Surface, model: PhysicsModel, rect: pygame.Rect) -> None:
@@ -1281,7 +1282,9 @@ class Renderer:
         screen.blit(buf, (buf_ox, buf_oy))
 
     def _draw_effects(self, screen: pygame.Surface, rect: pygame.Rect, model: PhysicsModel, frame_dt: float) -> None:
-        landed = model.result != SimResult.RUNNING
+        # Stop entry/engine VFX after success, or after failure once on/near the surface.
+        alt = float(model.altitude_m)
+        landed = model.result == SimResult.SUCCESS or (model.failed and alt <= 3.0)
 
         # entry glow when fast and high-ish density
         if abs(model.vertical_speed_mps) > 1200 and model.atm_density_kg_m3 > 0.05 and not landed:

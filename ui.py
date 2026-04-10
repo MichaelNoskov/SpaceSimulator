@@ -12,8 +12,8 @@ import pygame
 
 from control.commands import Command
 from control.controller import Controller
-from digital_twin.config import BodyConfig
-from digital_twin.model import SimResult
+from digital_twin.config import BodyConfig, DigitalTwinConfig
+from digital_twin.model import PhysicsModel, SimResult
 from flight_program import (
     AP_API_COMPLETIONS,
     DEFAULT_SCRIPT,
@@ -61,11 +61,20 @@ I18N = {
         "target": "Клик по карте — цель",
         "success": "УСПЕХ",
         "failure": "ПРОВАЛ",
+        "fail_overload": "Превышена допустимая перегрузка",
+        "fail_t_int_min": "Внутренняя температура ниже минимума",
+        "fail_t_int_max": "Внутренняя температура выше максимума",
+        "fail_hs_thermal": "Термический предел теплозащиты",
+        "fail_hard_landing": "Жёсткая посадка",
+        "fail_wrong_site": "Неверная площадка посадки",
+        "fail_fuel": "Топливо исчерпано над поверхностью",
+        "fail_terrain": "Столкновение с рельефом",
         "csv_log_on": "CSV LOG: ВКЛ",
         "csv_log_off": "CSV LOG: ВЫКЛ",
         "lever_denied": "Сейчас недоступно",
         "help_title": "Управление",
         "help_body": (
+            "При запуске и после «Рестарт» — параметры миссии (прокрутка списка): вход, массы, A_ref/Cd, площади парашютов, двигатель.\n"
             "Клик по мини-карте — выбор точки посадки.\n"
             "Рычаги: зелёный индикатор — можно включить.\n"
             "Авто: логика из «Программирования полёта» (Python, tick(sim, ap)); по умолчанию — шаблон ТЗ, в редакторе можно подставить шаблон Huygens.\n"
@@ -118,6 +127,28 @@ I18N = {
         "plot_evt_en_on": "EN · вкл",
         "plot_evt_en_off": "EN · выкл",
         "plot_evt_tgt": "TGT · цель",
+        "ms_title": "Параметры миссии",
+        "ms_alt": "Высота входа (км MSL)",
+        "ms_speed": "Скорость входа (км/с)",
+        "ms_fuel": "Топливо (кг)",
+        "ms_start": "Начать миссию",
+        "ms_defaults": "По умолчанию",
+        "ms_hint": "",
+        "ms_bad": "Проверьте числа и диапазоны (см. подсказку в консоли).",
+        "esc_mission_setup": "Параметры старта",
+        "ms_field_alt_km": "Высота входа, км MSL",
+        "ms_field_speed_kms": "Скорость входа, км/с",
+        "ms_field_fuel": "Топливо, кг",
+        "ms_field_dry": "Сухая масса, кг",
+        "ms_field_hs": "Масса теплозащиты, кг",
+        "ms_field_a_ref": "Площадь миделя A_ref, м²",
+        "ms_field_cd0": "Cd базовый (корпус)",
+        "ms_field_drogue_a": "Тормозной парашют: площадь, м²",
+        "ms_field_drogue_cd": "Тормозной парашют: Cd",
+        "ms_field_main_a": "Основной парашют: площадь, м²",
+        "ms_field_main_cd": "Основной парашют: Cd",
+        "ms_field_t_max": "Двигатель: T_max, Н",
+        "ms_field_isp": "Двигатель: Isp, с",
     },
     "EN": {
         "title": "Titan Landing Simulator",
@@ -152,11 +183,20 @@ I18N = {
         "target": "Click map to set target",
         "success": "SUCCESS",
         "failure": "FAILURE",
+        "fail_overload": "G-load limit exceeded",
+        "fail_t_int_min": "Internal temperature below minimum",
+        "fail_t_int_max": "Internal temperature above maximum",
+        "fail_hs_thermal": "Heatshield thermal failure",
+        "fail_hard_landing": "Hard landing",
+        "fail_wrong_site": "Wrong landing site",
+        "fail_fuel": "Fuel exhausted above ground",
+        "fail_terrain": "Terrain collision",
         "csv_log_on": "CSV LOG: ON",
         "csv_log_off": "CSV LOG: OFF",
         "lever_denied": "Not available now",
         "help_title": "Controls",
         "help_body": (
+            "On launch and after «Restart», mission parameters (scroll the list): entry, masses, A_ref/Cd, chute areas, engine.\n"
             "Click the minimap to set a landing target.\n"
             "Levers: green lamp means the action is allowed.\n"
             "Auto: «Flight program» (Python, tick(sim, ap)); default template matches the simulator spec; editor can load a Huygens-style timeline template.\n"
@@ -209,8 +249,83 @@ I18N = {
         "plot_evt_en_on": "EN · on",
         "plot_evt_en_off": "EN · off",
         "plot_evt_tgt": "TGT · target",
+        "ms_title": "Mission parameters",
+        "ms_alt": "Entry altitude (km MSL)",
+        "ms_speed": "Entry speed (km/s)",
+        "ms_fuel": "Fuel (kg)",
+        "ms_start": "Start mission",
+        "ms_defaults": "Restore defaults",
+        "ms_hint": "",
+        "ms_bad": "Invalid numbers or out-of-range values.",
+        "esc_mission_setup": "Start parameters",
+        "ms_field_alt_km": "Entry altitude, km MSL",
+        "ms_field_speed_kms": "Entry speed, km/s",
+        "ms_field_fuel": "Fuel, kg",
+        "ms_field_dry": "Dry mass, kg",
+        "ms_field_hs": "Heatshield mass, kg",
+        "ms_field_a_ref": "Reference area A_ref, m²",
+        "ms_field_cd0": "Base Cd (hull)",
+        "ms_field_drogue_a": "Drogue chute: area, m²",
+        "ms_field_drogue_cd": "Drogue chute: Cd",
+        "ms_field_main_a": "Main chute: area, m²",
+        "ms_field_main_cd": "Main chute: Cd",
+        "ms_field_t_max": "Engine: T_max, N",
+        "ms_field_isp": "Engine: Isp, s",
     },
 }
+
+
+_MS_FIELD_ORDER = (
+    "alt_km",
+    "speed_kms",
+    "fuel",
+    "dry_kg",
+    "hs_kg",
+    "a_ref",
+    "cd0",
+    "drogue_a",
+    "drogue_cd",
+    "main_a",
+    "main_cd",
+    "t_max",
+    "isp",
+)
+
+_MS_FIELD_LABEL_KEYS = {
+    "alt_km": "ms_field_alt_km",
+    "speed_kms": "ms_field_speed_kms",
+    "fuel": "ms_field_fuel",
+    "dry_kg": "ms_field_dry",
+    "hs_kg": "ms_field_hs",
+    "a_ref": "ms_field_a_ref",
+    "cd0": "ms_field_cd0",
+    "drogue_a": "ms_field_drogue_a",
+    "drogue_cd": "ms_field_drogue_cd",
+    "main_a": "ms_field_main_a",
+    "main_cd": "ms_field_main_cd",
+    "t_max": "ms_field_t_max",
+    "isp": "ms_field_isp",
+}
+
+
+def _default_mission_field_text() -> dict[str, str]:
+    bc = BodyConfig()
+    dc = DigitalTwinConfig()
+    return {
+        "alt_km": f"{bc.entry_start_altitude_m * 1e-3:g}",
+        "speed_kms": f"{bc.entry_speed_mps * 1e-3:g}",
+        "fuel": "50",
+        "dry_kg": "270",
+        "hs_kg": "30",
+        "a_ref": "2.5",
+        "cd0": "1.2",
+        "drogue_a": f"{dc.drogue_area_m2:g}",
+        "drogue_cd": f"{dc.drogue_cd:g}",
+        "main_a": f"{dc.main_chute_area_m2:g}",
+        "main_cd": f"{dc.main_chute_cd:g}",
+        "t_max": f"{dc.engine.t_max_n:g}",
+        "isp": f"{dc.engine.isp_s:g}",
+    }
 
 
 class _MissionReportGeom(NamedTuple):
@@ -420,6 +535,12 @@ class UI:
         self.esc_menu_open: bool = False
         self.flight_program_editor_open: bool = False
         self.mission_report_open: bool = False
+        self.mission_setup_open: bool = True
+        self._ms_field_text: dict[str, str] = _default_mission_field_text()
+        self._ms_scroll_px: float = 0.0
+        self._ms_scroll_drag: bool = False
+        self._ms_scroll_grab_y: float = 0.0
+        self._ms_focus_idx: int = 0
         # Mission dossier: visible time window on plots (same coords as xs = t - t0).
         self._mission_view_lo: float = 0.0
         self._mission_view_hi: float = 1.0
@@ -434,6 +555,7 @@ class UI:
         # Set by main; used by renderer-less overlay calls.
         self.controller: Optional[Controller] = None
         self._text_cache: dict[tuple, pygame.Surface] = {}
+        self._failure_hud_hover_rect: Optional[pygame.Rect] = None
 
         w, h = rect.size
         # Draw everything as overlay on the scene (no separate mid/ctrl strips).
@@ -616,6 +738,14 @@ class UI:
     def t(self, key: str) -> str:
         return I18N[self.lang][key]
 
+    def _t_failure_reason(self, category_id: str) -> str:
+        """Translate model failure category id (e.g. ``overload``)."""
+        k = f"fail_{category_id}"
+        tab = I18N[self.lang]
+        if k in tab:
+            return str(tab[k])
+        return category_id
+
     def _cached_render(self, font: pygame.font.Font, text: str, color: tuple[int, ...]) -> pygame.Surface:
         key = (id(font), text, color)
         surf = self._text_cache.get(key)
@@ -653,11 +783,182 @@ class UI:
         self._fp_stop_text_input()
         self.mission_report_open = False
         self.flight_program_sleep_until_s = None
+        self.mission_setup_open = True
+        self._ms_focus_idx = 0
+        self._ms_scroll_px = 0.0
+        self._ms_scroll_drag = False
+
+    def sync_mission_setup_from_model(self, model: PhysicsModel) -> None:
+        """Refresh mission setup text fields from `PhysicsModel` mission getters."""
+        self._ms_field_text = {
+            "alt_km": f"{float(model.mission_entry_start_altitude_m) * 1e-3:g}",
+            "speed_kms": f"{float(model.mission_entry_speed_mps) * 1e-3:g}",
+            "fuel": f"{float(model.mission_fuel_kg):g}",
+            "dry_kg": f"{float(model.mission_dry_mass_kg):g}",
+            "hs_kg": f"{float(model.mission_heatshield_mass_kg):g}",
+            "a_ref": f"{float(model.mission_a_ref_m2):g}",
+            "cd0": f"{float(model.mission_cd_base):g}",
+            "drogue_a": f"{float(model.mission_drogue_area_m2):g}",
+            "drogue_cd": f"{float(model.mission_drogue_cd):g}",
+            "main_a": f"{float(model.mission_main_chute_area_m2):g}",
+            "main_cd": f"{float(model.mission_main_chute_cd):g}",
+            "t_max": f"{float(model.mission_engine_t_max_n):g}",
+            "isp": f"{float(model.mission_engine_isp_s):g}",
+        }
+        self._ms_scroll_px = 0.0
+
+    def _mission_setup_restore_body_defaults(self) -> None:
+        self._ms_field_text = _default_mission_field_text()
+        self._ms_scroll_px = 0.0
+
+    def _mission_setup_try_apply(self, c: Controller) -> None:
+        def pf(key: str) -> float:
+            return float(self._ms_field_text[key].strip().replace(",", "."))
+
+        try:
+            alt_km = pf("alt_km")
+            spd_kms = pf("speed_kms")
+            fuel = pf("fuel")
+            dry = pf("dry_kg")
+            hs = pf("hs_kg")
+            a_ref = pf("a_ref")
+            cd0 = pf("cd0")
+            da = pf("drogue_a")
+            dcd = pf("drogue_cd")
+            ma = pf("main_a")
+            mcd = pf("main_cd")
+            tmax = pf("t_max")
+            isp = pf("isp")
+        except (ValueError, KeyError):
+            self._toast_until_ms = pygame.time.get_ticks() + 4000
+            self._toast_custom = self.t("ms_bad")
+            return
+        try:
+            c.model.set_mission_parameters(
+                entry_start_altitude_m=alt_km * 1000.0,
+                entry_speed_mps=spd_kms * 1000.0,
+                fuel_kg=fuel,
+                dry_mass_kg=dry,
+                heatshield_mass_kg=hs,
+                a_ref_m2=a_ref,
+                cd_base=cd0,
+                drogue_area_m2=da,
+                drogue_cd=dcd,
+                main_chute_area_m2=ma,
+                main_chute_cd=mcd,
+                engine_t_max_n=tmax,
+                engine_isp_s=isp,
+            )
+        except ValueError as ex:
+            self._toast_until_ms = pygame.time.get_ticks() + 5000
+            self._toast_custom = str(ex)[:220]
+            return
+        c.model.reset()
+        self.mission_setup_open = False
+        self._toast_custom = None
+
+    def _mission_setup_layout(self) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect, int, int, int, int, int, pygame.Rect, pygame.Rect, pygame.Rect, float]:
+        """
+        panel, viewport, scroll_track, row_h, gap, label_w, inp_w, pad,
+        def_btn, start_btn, lang, max_scroll_px.
+        """
+        pad = int(16 * self.ui_scale)
+        row_h = int(34 * self.ui_scale)
+        gap = int(8 * self.ui_scale)
+        title_h = int(34 * self.ui_scale)
+        hint_h = int(22 * self.ui_scale)
+        btn_h = int(38 * self.ui_scale)
+        btn_gap = int(10 * self.ui_scale)
+        bw = int(min(720 * self.ui_scale, max(420.0, self.visual_rect.width - 80)))
+        viewport_h = int(min(320 * self.ui_scale, self.visual_rect.height * 0.42))
+        scroll_w = int(12 * self.ui_scale)
+        bh = pad + title_h + viewport_h + hint_h + btn_gap + btn_h + pad
+        panel = pygame.Rect(0, 0, int(bw), int(bh))
+        panel.center = self.visual_rect.center
+        inner_w = panel.width - 2 * pad - scroll_w - 6
+        label_w = int(inner_w * 0.52)
+        inp_w = inner_w - label_w - int(8 * self.ui_scale)
+        v_top = panel.top + pad + title_h + int(4 * self.ui_scale)
+        viewport = pygame.Rect(panel.left + pad, v_top, inner_w, viewport_h)
+        scroll_track = pygame.Rect(viewport.right + 4, viewport.top, scroll_w, viewport.height)
+        n = len(_MS_FIELD_ORDER)
+        content_h = n * row_h + max(0, n - 1) * gap
+        max_scroll = max(0.0, float(content_h - viewport_h))
+        btn_y = panel.bottom - pad - btn_h
+        btn_w = int(200 * self.ui_scale)
+        def_btn = pygame.Rect(panel.left + pad, btn_y, btn_w, btn_h)
+        start_btn = pygame.Rect(panel.right - pad - btn_w, btn_y, btn_w, btn_h)
+        lang = pygame.Rect(panel.right - pad - int(72 * self.ui_scale), panel.top + pad, int(72 * self.ui_scale), int(28 * self.ui_scale))
+        return (
+            panel,
+            viewport,
+            scroll_track,
+            row_h,
+            gap,
+            label_w,
+            inp_w,
+            pad,
+            def_btn,
+            start_btn,
+            lang,
+            max_scroll,
+        )
+
+    def _mission_setup_clamp_scroll(self, max_scroll: float) -> None:
+        self._ms_scroll_px = float(np.clip(self._ms_scroll_px, 0.0, max(0.0, max_scroll)))
+
+    def _mission_setup_row_index_at(self, pos: tuple[int, int], layout: tuple) -> Optional[int]:
+        panel, viewport, scroll_track, row_h, gap, label_w, inp_w, pad, def_btn, start_btn, lang, max_scroll = layout
+        if not viewport.collidepoint(pos):
+            return None
+        sc = float(np.clip(self._ms_scroll_px, 0.0, max_scroll))
+        x, y = pos
+        for i in range(len(_MS_FIELD_ORDER)):
+            ry = viewport.top + i * (row_h + gap) - sc
+            rr = pygame.Rect(viewport.left, ry, viewport.width, row_h)
+            if rr.collidepoint(x, y):
+                return i
+        return None
+
+    def _mission_setup_append_char(self, ch: str) -> None:
+        if ch not in "0123456789.,":
+            return
+        ch = "." if ch == "," else ch
+        if self._ms_focus_idx < 0 or self._ms_focus_idx >= len(_MS_FIELD_ORDER):
+            return
+        key = _MS_FIELD_ORDER[self._ms_focus_idx]
+        cur = self._ms_field_text.get(key, "")
+        if ch == "." and "." in cur:
+            return
+        self._ms_field_text[key] = cur + ch
 
     def handle_keydown(self, event: pygame.event.Event, c: Controller) -> bool:
         if event.type != pygame.KEYDOWN:
             return False
         sc = event.scancode
+        if self.mission_setup_open:
+            if sc == pygame.KSCAN_ESCAPE and self.show_help:
+                self.show_help = False
+                return True
+            if sc == pygame.KSCAN_F1:
+                self.show_help = not self.show_help
+                return True
+            if sc == pygame.KSCAN_TAB:
+                self._ms_focus_idx = (self._ms_focus_idx + 1) % len(_MS_FIELD_ORDER)
+                return True
+            if sc in (pygame.KSCAN_RETURN, pygame.KSCAN_KP_ENTER):
+                self._mission_setup_try_apply(c)
+                return True
+            if sc == pygame.KSCAN_BACKSPACE:
+                fk = _MS_FIELD_ORDER[self._ms_focus_idx]
+                cur = self._ms_field_text.get(fk, "")
+                self._ms_field_text[fk] = cur[:-1]
+                return True
+            u = event.unicode
+            if u:
+                self._mission_setup_append_char(u)
+                return True
+            return True
         if self.flight_program_editor_open:
             if sc == pygame.KSCAN_ESCAPE:
                 self._flight_program_cancel()
@@ -721,12 +1022,21 @@ class UI:
 
     def _esc_menu_layout_full(
         self,
-    ) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect]:
-        """Order: resume, auto/manual, language, restart, CSV, flight program, quit."""
+    ) -> tuple[
+        pygame.Rect,
+        pygame.Rect,
+        pygame.Rect,
+        pygame.Rect,
+        pygame.Rect,
+        pygame.Rect,
+        pygame.Rect,
+        pygame.Rect,
+    ]:
+        """Order: resume, auto/manual, language, restart, mission params, CSV, flight program, quit."""
         cx = self.visual_rect.centerx
         bw, bh = int(240 * self.ui_scale), int(44 * self.ui_scale)
         gap = int(10 * self.ui_scale)
-        n = 7
+        n = 8
         total_h = n * bh + (n - 1) * gap
         y0 = self.visual_rect.centery - total_h // 2 + int(28 * self.ui_scale)
         rects: list[pygame.Rect] = []
@@ -735,7 +1045,7 @@ class UI:
             r.centerx = cx
             r.top = y0 + i * (bh + gap)
             rects.append(r)
-        return (rects[0], rects[1], rects[2], rects[3], rects[4], rects[5], rects[6])
+        return (rects[0], rects[1], rects[2], rects[3], rects[4], rects[5], rects[6], rects[7])
 
     def handle_event(self, event: pygame.event.Event, c: Controller) -> None:
         if self.flight_program_editor_open:
@@ -808,12 +1118,92 @@ class UI:
                 return
             return
 
+        if self.mission_setup_open:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and self.show_help:
+                self.show_help = False
+                return
+            lay = self._mission_setup_layout()
+            (
+                panel,
+                viewport,
+                scroll_track,
+                row_h,
+                gap,
+                label_w,
+                inp_w,
+                pad,
+                def_btn,
+                start_btn,
+                lang_r,
+                max_scroll,
+            ) = lay
+            viewport_h = float(viewport.height)
+            content_h = max_scroll + viewport_h
+
+            if event.type == pygame.MOUSEWHEEL:
+                mp = pygame.mouse.get_pos()
+                dy = float(getattr(event, "y", 0))
+                if viewport.collidepoint(mp) or scroll_track.collidepoint(mp):
+                    self._ms_scroll_px -= dy * float(row_h) * 0.65
+                    self._mission_setup_clamp_scroll(max_scroll)
+                return
+
+            if event.type == pygame.MOUSEMOTION and self._ms_scroll_drag and event.buttons[0]:
+                tr = scroll_track
+                thumb_h = max(int(18 * self.ui_scale), int(viewport_h * viewport_h / max(content_h, 1.0)))
+                travel = max(1.0, float(tr.height - thumb_h))
+                new_y = float(event.pos[1]) - float(self._ms_scroll_grab_y)
+                frac = float(np.clip((new_y - tr.top) / travel, 0.0, 1.0))
+                self._ms_scroll_px = frac * max_scroll
+                self._mission_setup_clamp_scroll(max_scroll)
+                return
+
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._ms_scroll_drag = False
+                return
+
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                idx = self._mission_setup_row_index_at(event.pos, lay)
+                if idx is not None:
+                    self._ms_focus_idx = idx
+                    return
+                if max_scroll > 1e-6:
+                    tr = scroll_track
+                    sc = float(np.clip(self._ms_scroll_px, 0.0, max_scroll))
+                    thumb_h = max(int(18 * self.ui_scale), int(viewport_h * viewport_h / max(content_h, 1.0)))
+                    travel = max(1.0, float(tr.height - thumb_h))
+                    thumb_y = tr.top + (sc / max_scroll) * travel if max_scroll > 1e-6 else tr.top
+                    thumb = pygame.Rect(tr.left, int(thumb_y), tr.width, thumb_h)
+                    if thumb.collidepoint(event.pos):
+                        self._ms_scroll_drag = True
+                        self._ms_scroll_grab_y = float(event.pos[1]) - float(thumb_y)
+                        return
+                    if tr.collidepoint(event.pos) and not thumb.collidepoint(event.pos):
+                        my = float(event.pos[1] - tr.top) - 0.5 * thumb_h
+                        frac = float(np.clip(my / travel, 0.0, 1.0))
+                        self._ms_scroll_px = frac * max_scroll
+                        self._mission_setup_clamp_scroll(max_scroll)
+                        return
+                if def_btn.collidepoint(event.pos):
+                    self._mission_setup_restore_body_defaults()
+                    return
+                if start_btn.collidepoint(event.pos):
+                    self._mission_setup_try_apply(c)
+                    return
+                if lang_r.collidepoint(event.pos):
+                    self.lang = "EN" if self.lang == "RU" else "RU"
+                    return
+                if panel.collidepoint(event.pos):
+                    return
+                return
+            return
+
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.show_help:
                 self.show_help = False
                 return
             if self.esc_menu_open:
-                r_res, r_mode, r_lang, r_rst, r_log, r_fp, r_quit = self._esc_menu_layout_full()
+                r_res, r_mode, r_lang, r_rst, r_ms, r_log, r_fp, r_quit = self._esc_menu_layout_full()
                 if r_res.collidepoint(event.pos):
                     self.esc_menu_open = False
                     return
@@ -825,6 +1215,12 @@ class UI:
                     return
                 if r_rst.collidepoint(event.pos):
                     self._request_restart()
+                    return
+                if r_ms.collidepoint(event.pos):
+                    self.mission_setup_open = True
+                    self.esc_menu_open = False
+                    self.sync_mission_setup_from_model(c.model)
+                    self._ms_focus_idx = 0
                     return
                 if r_log.collidepoint(event.pos):
                     c.queue(Command(request_toggle_csv_logging=True))
@@ -2098,26 +2494,65 @@ class UI:
         g_txt = self._cached_render(self.font_mono, f"{g_load:05.2f} g", (120, 230, 190))
         surf.blit(g_txt, g_txt.get_rect(center=(g_rect.centerx, g_rect.centery + int(8 * self.ui_scale))))
 
+        self._draw_controls(surf, c)
+        self._draw_mission_dossier_button(surf, c)
+
+    def draw_failure_outcome(self, surf: pygame.Surface, c: Controller) -> None:
+        """Success / failure banner and reason list; drawn after pause so tooltips are not covered."""
+        self._failure_hud_hover_rect = None
         if c.model.result == SimResult.SUCCESS:
             msg = self._cached_render(self.font_big, self.t("success"), (80, 220, 120))
             surf.blit(msg, (self.visual_rect.right - msg.get_width() - 16, self.visual_rect.top + 16))
-        elif bool(c.model.failed):
-            msg = self._cached_render(self.font_big, self.t("failure"), (230, 80, 80))
-            surf.blit(msg, (self.visual_rect.right - msg.get_width() - 16, self.visual_rect.top + 16))
-            reason = str(c.model.failure_reason)
-            if reason:
-                reason_txt = self._cached_render(self.font_small, reason, (230, 190, 90))
-                surf.blit(
-                    reason_txt,
-                    (self.visual_rect.right - reason_txt.get_width() - 16, self.visual_rect.top + 50),
-                )
-
-        self._draw_controls(surf, c)
-        self._draw_mission_dossier_button(surf, c)
+            return
+        if not bool(c.model.failed):
+            return
+        msg = self._cached_render(self.font_big, self.t("failure"), (230, 80, 80))
+        mx = self.visual_rect.right - msg.get_width() - 16
+        my = self.visual_rect.top + 16
+        surf.blit(msg, (mx, my))
+        msg_rect = pygame.Rect(mx, my, msg.get_width(), msg.get_height())
+        reason_key = str(c.model.failure_reason)
+        union_r = msg_rect
+        if reason_key:
+            reason_txt = self._cached_render(
+                self.font_small, self._t_failure_reason(reason_key), (230, 190, 90)
+            )
+            rx = self.visual_rect.right - reason_txt.get_width() - 16
+            ry = self.visual_rect.top + 50
+            surf.blit(reason_txt, (rx, ry))
+            union_r = msg_rect.union(pygame.Rect(rx, ry, reason_txt.get_width(), reason_txt.get_height()))
+        self._failure_hud_hover_rect = union_r
+        keys = tuple(c.model.failure_reasons)
+        lines = [self._t_failure_reason(k) for k in keys]
+        if len(lines) > 1 and self._failure_hud_hover_rect.collidepoint(pygame.mouse.get_pos()):
+            pad = int(8 * self.ui_scale)
+            line_h = int(16 * self.ui_scale)
+            tw = max(self._cached_render(self.font_small, s, (220, 215, 200)).get_width() for s in lines)
+            th = len(lines) * line_h + 2 * pad
+            tip = pygame.Surface((tw + 2 * pad, th), pygame.SRCALPHA)
+            tip.fill((18, 16, 14, 245))
+            pygame.draw.rect(tip, (120, 100, 70), tip.get_rect(), width=1, border_radius=8)
+            for i, line in enumerate(lines):
+                ln = self._cached_render(self.font_small, line, (220, 210, 195))
+                tip.blit(ln, (pad, pad + i * line_h))
+            tw_total = tw + 2 * pad
+            margin = int(8 * self.ui_scale)
+            vr = self.visual_rect
+            tx = min(self._failure_hud_hover_rect.left, vr.right - tw_total - margin)
+            tx = max(margin, tx)
+            ty_preferred = float(self._failure_hud_hover_rect.bottom + margin)
+            max_ty = float(vr.bottom - th - margin)
+            min_ty = float(vr.top + margin)
+            if max_ty >= min_ty:
+                ty = float(np.clip(ty_preferred, min_ty, max_ty))
+            else:
+                ty = min_ty
+            surf.blit(tip, (int(tx), int(ty)))
 
     def draw_overlay(self, surf: pygame.Surface, c: Controller) -> None:
         self._draw_overlay_hud(surf, c)
         self._draw_modal_overlays(surf, c)
+        self.draw_failure_outcome(surf, c)
 
     def _draw_telemetry_panel(self, surf: pygame.Surface) -> None:
         tr = self.telemetry_rect
@@ -2155,14 +2590,17 @@ class UI:
             pygame.draw.rect(surf, (140, 120, 80), chip, width=2, border_radius=12)
             surf.blit(chip_txt, chip_txt.get_rect(center=chip.center))
 
-        if self.show_help:
-            self._draw_help_panel(surf)
-
         if self.esc_menu_open:
             self._draw_esc_menu(surf, c)
 
         if self.flight_program_editor_open:
             self._draw_flight_program_editor(surf)
+
+        if self.mission_setup_open:
+            self._draw_mission_setup(surf, c)
+
+        if self.show_help:
+            self._draw_help_panel(surf)
 
         if now < self._toast_until_ms:
             toast_txt = self._toast_custom if self._toast_custom else self.t(self._toast_key)
@@ -2205,7 +2643,7 @@ class UI:
         dim = pygame.Surface(self.visual_rect.size, pygame.SRCALPHA)
         dim.fill((0, 0, 0, 160))
         surf.blit(dim, (0, 0))
-        r_res, r_mode, r_lang, r_rst, r_log, r_fp, r_quit = self._esc_menu_layout_full()
+        r_res, r_mode, r_lang, r_rst, r_ms, r_log, r_fp, r_quit = self._esc_menu_layout_full()
         title = self._cached_render(self.font_big, self.t("esc_title"), (240, 240, 245))
         cx = self.visual_rect.centerx
         surf.blit(title, title.get_rect(center=(cx, r_res.top - int(36 * self.ui_scale))))
@@ -2222,9 +2660,86 @@ class UI:
         pill(r_mode, self.t("auto") if self.auto_mode else self.t("manual"), True)
         pill(r_lang, self.t("lang"), True)
         pill(r_rst, self.t("restart"), True)
+        pill(r_ms, self.t("esc_mission_setup"), True)
         pill(r_log, self.t("csv_log_on") if log_on else self.t("csv_log_off"), log_on)
         pill(r_fp, self.t("esc_flight_program"), True)
         pill(r_quit, self.t("esc_quit"), True)
+
+    def _draw_mission_setup(self, surf: pygame.Surface, c: Controller) -> None:
+        dim = pygame.Surface(self.visual_rect.size, pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 185))
+        surf.blit(dim, (0, 0))
+        lay = self._mission_setup_layout()
+        (
+            panel,
+            viewport,
+            scroll_track,
+            row_h,
+            gap,
+            label_w,
+            inp_w,
+            pad,
+            def_btn,
+            start_btn,
+            lang_r,
+            max_scroll,
+        ) = lay
+        viewport_h = float(viewport.height)
+        content_h = max_scroll + viewport_h
+        sc = float(np.clip(self._ms_scroll_px, 0.0, max_scroll))
+
+        bg = pygame.Surface(panel.size, pygame.SRCALPHA)
+        bg.fill((14, 16, 22, 245))
+        surf.blit(bg, panel.topleft)
+        pygame.draw.rect(surf, (95, 100, 120), panel, width=2, border_radius=14)
+        title = self._cached_render(self.font_big, self.t("ms_title"), (240, 240, 245))
+        surf.blit(title, (panel.left + int(16 * self.ui_scale), panel.top + int(14 * self.ui_scale)))
+        lang_t = self._cached_render(self.font_small, self.t("lang"), (210, 210, 220))
+        pygame.draw.rect(surf, (42, 44, 52), lang_r, border_radius=8)
+        pygame.draw.rect(surf, (130, 135, 150), lang_r, width=1, border_radius=8)
+        surf.blit(lang_t, lang_t.get_rect(center=lang_r.center))
+
+        pygame.draw.rect(surf, (26, 28, 34), viewport, border_radius=8)
+        pygame.draw.rect(surf, (75, 80, 92), viewport, width=1, border_radius=8)
+        prev_clip = surf.get_clip()
+        surf.set_clip(viewport)
+
+        for i, fk in enumerate(_MS_FIELD_ORDER):
+            ry = viewport.top + i * (row_h + gap) - sc
+            if ry + row_h < viewport.top or ry > viewport.bottom:
+                continue
+            lb = self.t(_MS_FIELD_LABEL_KEYS[fk])
+            lt = self._cached_render(self.font_small, lb, (200, 200, 210))
+            surf.blit(lt, (viewport.left + 4, ry + (row_h - lt.get_height()) // 2))
+            fr = pygame.Rect(viewport.left + label_w + 6, ry, inp_w, row_h)
+            hot = i == self._ms_focus_idx
+            pygame.draw.rect(surf, (28, 30, 38) if hot else (22, 24, 30), fr, border_radius=8)
+            pygame.draw.rect(surf, (130, 145, 175) if hot else (80, 85, 95), fr, width=2, border_radius=8)
+            val = self._ms_field_text.get(fk, "")
+            vt = self._cached_render(self.font_mono, val if val else " ", (235, 238, 245))
+            surf.blit(vt, (fr.left + int(8 * self.ui_scale), fr.centery - vt.get_height() // 2))
+
+        surf.set_clip(prev_clip)
+
+        if max_scroll > 1e-3:
+            pygame.draw.rect(surf, (32, 34, 42), scroll_track, border_radius=6)
+            pygame.draw.rect(surf, (70, 75, 88), scroll_track, width=1, border_radius=6)
+            thumb_h = max(int(18 * self.ui_scale), int(viewport_h * viewport_h / max(content_h, 1.0)))
+            travel = max(1.0, float(scroll_track.height - thumb_h))
+            thumb_y = scroll_track.top + (sc / max_scroll) * travel if max_scroll > 1e-6 else float(scroll_track.top)
+            thumb = pygame.Rect(scroll_track.left, int(thumb_y), scroll_track.width, thumb_h)
+            pygame.draw.rect(surf, (95, 100, 118), thumb, border_radius=5)
+
+        def pill_btn(rect: pygame.Rect, label: str) -> None:
+            pygame.draw.rect(surf, (48, 52, 62), rect, border_radius=10)
+            pygame.draw.rect(surf, (150, 155, 170), rect, width=2, border_radius=10)
+            t = self._cached_render(self.font_small, label, (235, 235, 240))
+            surf.blit(t, t.get_rect(center=rect.center))
+
+        pill_btn(def_btn, self.t("ms_defaults"))
+        pill_btn(start_btn, self.t("ms_start"))
+        hint = self._cached_render(self.font_small, self.t("ms_hint"), (140, 140, 155))
+        surf.blit(hint, (panel.left + pad, panel.bottom - pad - hint.get_height()))
 
     def _draw_controls(self, surf: pygame.Surface, c: Controller) -> None:
         # --- top-left: minimap + time (in visual area) ---

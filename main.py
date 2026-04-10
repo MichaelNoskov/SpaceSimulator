@@ -18,7 +18,7 @@ if sys.platform == "win32":
 import pygame
 
 from control.controller import Controller
-from digital_twin.model import PhysicsModel, SimResult
+from digital_twin.model import PhysicsModel
 from flight_program import DEFAULT_SCRIPT, compile_flight_program
 from ui import UI
 from render import Renderer
@@ -82,6 +82,12 @@ def _migrate_ui_state(prev: UI, new: UI) -> None:
     new._toast_custom = getattr(prev, "_toast_custom", None)
     new._toast_until_ms = getattr(prev, "_toast_until_ms", 0)
     new._toast_key = getattr(prev, "_toast_key", "lever_denied")
+    new.mission_setup_open = getattr(prev, "mission_setup_open", False)
+    prev_ft = getattr(prev, "_ms_field_text", None)
+    if isinstance(prev_ft, dict):
+        new._ms_field_text = dict(prev_ft)
+    new._ms_scroll_px = float(getattr(prev, "_ms_scroll_px", new._ms_scroll_px))
+    new._ms_focus_idx = int(getattr(prev, "_ms_focus_idx", 0))
     new._fp_text_input_started = False
     if new.flight_program_editor_open:
         new._fp_start_text_input()
@@ -140,7 +146,7 @@ def main() -> int:
                 ui.handle_event(event, controller)
 
         # Simulation pause is the Esc menu or the flight program editor.
-        paused = ui.esc_menu_open or ui.flight_program_editor_open
+        paused = ui.esc_menu_open or ui.flight_program_editor_open or ui.mission_setup_open
 
         if ui.consume_quit_request():
             running = False
@@ -148,6 +154,7 @@ def main() -> int:
         if ui.consume_restart_request():
             model.reset()
             accumulator = 0.0
+            ui.sync_mission_setup_from_model(model)
 
         if paused:
             ui.apply_continuous_controls(controller)
@@ -164,7 +171,8 @@ def main() -> int:
             while accumulator > acc_eps and phys_iters < max_phys_iters:
                 ui.apply_continuous_controls(controller)
                 controller.consume_and_apply()
-                sim_running = model.result == SimResult.RUNNING
+                # Coarse dt while still in flight (touchdown stops physics).
+                sim_running = not model.landing_finished
                 backlog = accumulator > 0.12
                 h = float(model.altitude_m)
                 acc = float(accumulator)
@@ -189,7 +197,7 @@ def main() -> int:
                 model.step(dt)
                 accumulator -= dt
                 phys_iters += 1
-                if model.result != SimResult.RUNNING:
+                if model.landing_finished:
                     accumulator = 0.0
                     break
 

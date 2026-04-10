@@ -17,6 +17,7 @@
 | [Key formulas](#key-formulas) | Thrust, Mach, drag, atmosphere |
 | [Landing phases](#landing-phases) | Descent timeline |
 | [Code map](#code-map) | Project layout |
+| [Architecture](#architecture) | Data-flow diagrams |
 | [Data and license](#data-and-license) | `data/`, MIT |
 | [Links](#links) | ESA Huygens |
 
@@ -290,6 +291,60 @@ A Huygens-like descent chain in the simulator’s terms.
 | `flight_program/` | Autopilot script: `runner.py` (API, validation), `highlighter.py` (editor colors) |
 | `ui.py` | Instruments, levers, i18n, post-landing plots |
 | `render.py` | World draw order, minimap |
+
+---
+
+## Architecture
+
+High-level block diagrams (Mermaid; rendered on GitHub).
+
+### Application layout
+
+```mermaid
+flowchart TB
+    subgraph app["Entry"]
+        M[main.py]
+    end
+    subgraph ui_layer["UI"]
+        UI[ui.py — HUD, menus, mission start, flight program]
+        R[render.py / render_gl.py — scene]
+    end
+    subgraph ctrl["Control"]
+        C[control/controller.py]
+    end
+    subgraph sim["Simulation"]
+        P[PhysicsModel — digital_twin/model.py]
+        D[dynamics.py]
+        A[atmosphere + wind]
+        W[world.py — terrain / lakes]
+    end
+    M --> UI
+    M --> R
+    M --> C
+    UI --> C
+    C --> P
+    P --> D
+    P --> A
+    P --> W
+    R --> P
+```
+
+### Per-frame data flow
+
+```mermaid
+sequenceDiagram
+    participant Loop as main loop
+    participant UI as UI
+    participant Ctrl as Controller
+    participant Model as PhysicsModel
+    Loop->>UI: events, sync_from_twin
+    UI->>Ctrl: queue(Command)
+    Loop->>Ctrl: consume_and_apply
+    Ctrl->>Model: levers, target, CSV
+    Loop->>Model: step(dt)
+    Loop->>UI: draw HUD
+    Loop->>Model: telemetry for render
+```
 
 ---
 

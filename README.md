@@ -17,6 +17,7 @@
 | [Ключевые формулы](#ключевые-формулы) | Тяга, Мах, сопротивление, атмосфера |
 | [Этапы посадки](#этапы-посадки) | Фазы спуска |
 | [Структура кода](#структура-кода-кратко) | Файлы проекта |
+| [Архитектура](#архитектура) | Блок-схемы потоков данных |
 | [Данные и лицензия](#данные-и-лицензия) | `data/`, MIT |
 | [Ссылки](#ссылки) | ESA Huygens |
 
@@ -294,6 +295,60 @@ $$
 | `flight_program/` | Скрипт автопилота: `runner.py` (API, валидация), `highlighter.py` (подсветка в редакторе) |
 | `ui.py` | Приборы, рычаги, i18n, графики после посадки |
 | `render.py` | Сцена, мини-карта, порядок отрисовки |
+
+---
+
+## Архитектура
+
+Ниже — упрощённые блок-схемы (Mermaid; на GitHub отображаются как диаграммы).
+
+### Общая структура приложения
+
+```mermaid
+flowchart TB
+    subgraph app["Запуск"]
+        M[main.py]
+    end
+    subgraph ui_layer["Интерфейс"]
+        UI[ui.py — приборы, меню, параметры миссии, программа полёта]
+        R[render.py / render_gl.py — сцена]
+    end
+    subgraph ctrl["Управление"]
+        C[control/controller.py]
+    end
+    subgraph sim["Физика и мир"]
+        P[PhysicsModel — digital_twin/model.py]
+        D[dynamics.py]
+        A[atmosphere + wind]
+        W[world.py — рельеф / озёра]
+    end
+    M --> UI
+    M --> R
+    M --> C
+    UI --> C
+    C --> P
+    P --> D
+    P --> A
+    P --> W
+    R --> P
+```
+
+### Поток данных за кадр
+
+```mermaid
+sequenceDiagram
+    participant Loop as main loop
+    participant UI as UI
+    participant Ctrl as Controller
+    participant Model as PhysicsModel
+    Loop->>UI: события, sync_from_twin
+    UI->>Ctrl: queue(Command)
+    Loop->>Ctrl: consume_and_apply
+    Ctrl->>Model: рычаги, цель, CSV
+    Loop->>Model: step(dt)
+    Loop->>UI: draw приборов
+    Loop->>Model: данные для render
+```
 
 ---
 

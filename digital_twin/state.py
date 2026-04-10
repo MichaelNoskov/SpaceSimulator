@@ -62,6 +62,11 @@ class SimState:
     m_fuel_kg: float = 50.0
     cd_base: float = 1.2
     a_ref_m2: float = 2.5
+    # Parachute effective geometry (see DigitalTwinConfig defaults; PhysicsModel may override per mission).
+    drogue_area_m2: float = 5.3
+    drogue_cd: float = 1.6
+    main_chute_area_m2: float = 54.0
+    main_chute_cd: float = 1.7
 
     # systems / events (mission flags)
     heatshield_jettisoned: bool = False
