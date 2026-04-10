@@ -65,8 +65,16 @@ if _TABLES is None:
 def wind_mean_vec_mps(h_m: float) -> tuple[float, float]:
     """DWE-based mean horizontal wind (zonal + meridional) [m/s]."""
     h = float(h_m)
-    wx = float(np.interp(h, _TABLES.alt_m, _TABLES.v_x_mps))
-    wz = float(np.interp(h, _TABLES.alt_m, _TABLES.v_z_mps))
+    alt = _TABLES.alt_m
+    wx = float(np.interp(h, alt, _TABLES.v_x_mps))
+    wz = float(np.interp(h, alt, _TABLES.v_z_mps))
+    # np.interp above таблицы держит последнее значение — для согласованности с разреженной атмосферой ослабляем хвост.
+    h_hi = float(alt[-1])
+    if h > h_hi and h_hi > 0.0:
+        tau = 120_000.0
+        s = math.exp(-(h - h_hi) / tau)
+        wx *= s
+        wz *= s
     return wx, wz
 
 

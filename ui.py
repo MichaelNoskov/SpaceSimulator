@@ -12,6 +12,7 @@ import pygame
 
 from control.commands import Command
 from control.controller import Controller
+from digital_twin.config import BodyConfig
 from digital_twin.model import SimResult
 from flight_program import (
     AP_API_COMPLETIONS,
@@ -24,6 +25,7 @@ from flight_program import (
 )
 from flight_program.highlighter import iter_flight_program_tokens
 
+_ALT_H_KM_TOP = BodyConfig().entry_start_altitude_m * 1e-3
 
 I18N = {
     "RU": {
@@ -1732,14 +1734,13 @@ class UI:
         surf.blit(val, (rect.left + 10, rect.bottom - val.get_height() - 8))
 
     def _h_bar_value(self, h_km: float) -> float:
-        # Piecewise-linear mapping to stretch low altitudes:
-        # 0..20km -> 0..0.55, 20..200km -> 0.55..0.85, 200..1270km -> 0.85..1.0
         h_km = float(max(0.0, h_km))
         if h_km <= 20.0:
             return 0.55 * (h_km / 20.0)
         if h_km <= 200.0:
             return 0.55 + 0.30 * ((h_km - 20.0) / 180.0)
-        return 0.85 + 0.15 * (min(h_km, 1270.0) - 200.0) / 1070.0
+        span = max(1.0, _ALT_H_KM_TOP - 200.0)
+        return 0.85 + 0.15 * (min(h_km, _ALT_H_KM_TOP) - 200.0) / span
 
     def _h_from_bar_value(self, t: float) -> float:
         # Inverse of _h_bar_value(). Input t is 0..1, output km.
@@ -1748,7 +1749,8 @@ class UI:
             return 20.0 * (t / 0.55)
         if t <= 0.85:
             return 20.0 + 180.0 * ((t - 0.55) / 0.30)
-        return 200.0 + 1070.0 * ((t - 0.85) / 0.15)
+        span = max(1.0, _ALT_H_KM_TOP - 200.0)
+        return 200.0 + span * ((t - 0.85) / 0.15)
 
     def _titan_sky_color_by_alt(self, h_km: float) -> tuple[int, int, int]:
         # Approximate color progression similar to render._draw_sky palette.
@@ -1801,7 +1803,7 @@ class UI:
         pygame.draw.polygon(surf, (230, 80, 80), tri)
 
         # ticks (basic)
-        for km in [0.0, 2.0, 20.0, 200.0, 1270.0]:
+        for km in [0.0, 2.0, 20.0, 200.0, _ALT_H_KM_TOP]:
             tt = self._h_bar_value(km)
             yy = inner.bottom - int(np.clip(tt, 0.0, 1.0) * inner.height)
             pygame.draw.line(surf, (180, 180, 190), (inner.left - 2, yy), (inner.right + 2, yy), 1)

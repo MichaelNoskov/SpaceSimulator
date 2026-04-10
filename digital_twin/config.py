@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -12,6 +13,33 @@ class BodyConfig:
 
     rho_surface_kg_m3: float = 5.9
     scale_height_m: float = 40_000.0
+
+    # HASI / merged tables: на больших h плотность часто разрежена/сшита; выше якоря — экспонента (см. sample_atmosphere).
+    atmosphere_upper_anchor_alt_m: float = 700_000.0
+    atmosphere_upper_scale_height_m: float = 80_000.0
+    # Пока ρ очень мала, полная гравитация ускоряет вертикаль сильнее, чем тормозит сопротивление горизонталь — визуально «запаздывание» vx.
+    entry_low_density_rho_kg_m3: float = 5.0e-6
+    entry_low_density_gravity_scale: float = 0.55
+
+    # ТЗ: модуль скорости входа |v| [м/с] (~6.1 км/с); составляющие из угла γ ниже — см. entry_velocity_inertial_mps.
+    entry_speed_mps: float = 6100.0
+    entry_flight_path_angle_from_horizontal_deg: float = 65.4
+    entry_start_altitude_m: float = 1_700_000.0
+
+
+def entry_velocity_inertial_mps(body: BodyConfig) -> tuple[float, float, float]:
+    """
+    Inertial entry: flight-path angle γ above local horizontal, horizontal track along +x.
+
+    Invariant (Pythagorean «sum»): sqrt(v_x² + v_z² + v_vert²) == body.entry_speed_mps.
+    Returns (v_vert, v_x, v_z); v_vert < 0 (descent).
+    """
+
+    v = float(body.entry_speed_mps)
+    g = math.radians(float(body.entry_flight_path_angle_from_horizontal_deg))
+    v_vert = -v * math.sin(g)
+    v_x = v * math.cos(g)
+    return float(v_vert), float(v_x), 0.0
 
 
 @dataclass(frozen=True)
@@ -132,10 +160,11 @@ class DigitalTwinConfig:
     atmosphere_gamma: float = 1.4
     atmosphere_R_specific_j_kg_k: float = 296.8
 
-    # Minimum time under main chute before jettison (science descent ~2 h per spec).
-    science_descent_min_s: float = 7200.0
-    # Parachute altitude gates [m] (Huygens-class; must match auto program assumptions).
+    # Optional minimum time under main chute before jettison (0 = no hold; telemetry phase `science_descent` only if >0).
+    science_descent_min_s: float = 0.0
+    # Main deploy: below this altitude [m]. Jettison altitude is enforced by flight program / player, not the physics gate.
     parachute_main_max_deploy_alt_m: float = 160_000.0
+    # Nominal ТЗ jettison altitude [m] for docs / sim.parachute_jettison_max_alt_m (default auto script uses this value).
     parachute_jettison_max_alt_m: float = 2_000.0
     drogue_floor_alt_m: float = 0.0
 
@@ -144,4 +173,10 @@ class DigitalTwinConfig:
     # High-energy impact thresholds vs surface (separate from hard landing).
     terrain_collision_v_vert_mps: float = 30.0
     terrain_collision_v_hor_mps: float = 10.0
+    # Soft landing limits use pre-step speeds (see PhysicsModel.step); add this margin [m/s] to nominal limits.
+    touchdown_v_tol_mps: float = 0.1
+    # Touchdown g telemetry: τ_land from v_ref/(g_ref·g0), Earth g0 from EngineConfig; lake uses longer τ.
+    impact_calib_touchdown_speed_mps: float = 5.0
+    impact_calib_touchdown_g: float = 15.0
+    impact_lake_tau_multiplier: float = 2.0
 

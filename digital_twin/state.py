@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .config import BodyConfig, entry_velocity_inertial_mps
 from .types import SurfaceType  # noqa: F401 (re-export for backwards compat)
 
 from enum import Enum
+
+_bc = BodyConfig()
+_entry_vv, _entry_vx, _entry_vz = entry_velocity_inertial_mps(_bc)
 
 
 class SimResult(str, Enum):
@@ -43,13 +47,13 @@ class SimState:
     # time
     t_s: float = 0.0
 
-    # kinematics
-    h_m: float = 1_270_000.0
-    v_vert_mps: float = -6_500.0
+    # kinematics (defaults from BodyConfig via entry_velocity_inertial_mps)
+    h_m: float = float(_bc.entry_start_altitude_m)
+    v_vert_mps: float = _entry_vv
     x_m: float = 0.0
-    v_x_mps: float = 0.0
+    v_x_mps: float = _entry_vx
     z_m: float = 0.0
-    v_z_mps: float = 0.0
+    v_z_mps: float = _entry_vz
 
     # vehicle mass & aero reference
     # m_dry_kg includes heatshield mass until jettisoned.

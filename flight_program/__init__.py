@@ -3,6 +3,7 @@ from __future__ import annotations
 from .runner import (
     AP_API_COMPLETIONS,
     DEFAULT_SCRIPT,
+    HUYGENS_PARACHUTE_JETTISON_MAX_ALT_M,
     HUYGENS_SCRIPT,
     AutopilotActions,
     DryRunAutopilotActions,
@@ -11,12 +12,14 @@ from .runner import (
     SIM_API_COMPLETIONS,
     SimView,
     compile_flight_program,
+    is_huygens_flight_program,
     validate_flight_program_tick,
 )
 
 __all__ = [
     "AP_API_COMPLETIONS",
     "DEFAULT_SCRIPT",
+    "HUYGENS_PARACHUTE_JETTISON_MAX_ALT_M",
     "HUYGENS_SCRIPT",
     "AutopilotActions",
     "DryRunAutopilotActions",
@@ -25,5 +28,6 @@ __all__ = [
     "SIM_API_COMPLETIONS",
     "SimView",
     "compile_flight_program",
+    "is_huygens_flight_program",
     "validate_flight_program_tick",
 ]

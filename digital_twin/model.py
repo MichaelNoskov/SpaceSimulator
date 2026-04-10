@@ -11,7 +11,7 @@ from typing import Any, Deque, Optional, TextIO, Tuple
 
 import numpy as np
 
-from .config import DigitalTwinConfig
+from .config import DigitalTwinConfig, entry_velocity_inertial_mps
 from .dynamics import (
     aero_params_for_state,
     drag_force_vector_n,
@@ -70,7 +70,8 @@ class PhysicsModel:
         self._cache: dict[str, tuple[int, object]] = {}
         self._physics_seed = int(seed) & 0xFFFFFFFF
         self._reset_state()
-        self._target = self._make_target_at(0.0, 0.0)
+        tx, tz = self._nearest_land_point_m(0.0, 0.0)
+        self._target = self._make_target_at(tx, tz)
         self._csv_file: Optional[TextIO] = None
         self._csv_writer: Optional[Any] = None
         self._csv_log_path: Optional[str] = None
@@ -88,18 +89,16 @@ class PhysicsModel:
         # Absolute vertical position [m]: z_msl = terrain(x,z) + height above it.
         # Terrain from world.height_m_at; height above local surface = z_msl - terrain (see altitude_m).
         terrain0 = float(self._world.height_m_at(0.0, 0.0))
-        self._z_msl_m = 1_270_000.0 + terrain0
+        self._z_msl_m = float(self._cfg.body.entry_start_altitude_m) + terrain0
 
-        # Vertical speed [m/s], +up; negative means descent.
-        self._vertical_speed_mps = -6_500.0
+        vv0, vx0, vz0 = entry_velocity_inertial_mps(self._cfg.body)
+        self._vertical_speed_mps = vv0
+        self._speed_x_mps = vx0
+        self._speed_z_mps = vz0
 
         # World horizontal position [m] for minimap, target, surface type.
         self._pos_x_m = 0.0
         self._pos_z_m = 0.0
-
-        # Horizontal velocity [m/s] for wind drift, minimap, landing checks.
-        self._speed_x_mps = 0.0
-        self._speed_z_mps = 0.0
 
         # Dry mass [kg]; drives m_total_kg and accelerations.
         self._dry_mass_kg = 270.0
@@ -151,14 +150,33 @@ class PhysicsModel:
         self._failure_reasons: list[str] = []
         self._water_landed: bool = False
         self._t_main_deployed_s: Optional[float] = None
+        # Snapshot at step() entry; soft landing uses these (before Euler integration).
+        self._vv_step_start_mps = 0.0
+        self._speed_x_step_start_mps = 0.0
+        self._speed_z_step_start_mps = 0.0
+        self._last_physics_dt_s = 0.0
         self._telemetry_history.clear()
         self._plot_action_log.clear()
 
     def reset(self) -> None:
         self._close_csv_log()
         self._reset_state()
-        self._target = self._make_target_at(0.0, 0.0)
+        tx, tz = self._nearest_land_point_m(0.0, 0.0)
+        self._target = self._make_target_at(tx, tz)
         self._invalidate_cache()
+
+    def _nearest_land_point_m(self, x0: float, z0: float) -> tuple[float, float]:
+        if self._world.surface_type_at(float(x0), float(z0)) != SurfaceType.LAKE:
+            return float(x0), float(z0)
+        for ring in range(1, 900):
+            r = float(ring) * 320.0
+            for k in range(28):
+                ang = (2.0 * math.pi * k) / 28.0
+                x = float(x0) + r * math.cos(ang)
+                z = float(z0) + r * math.sin(ang)
+                if self._world.surface_type_at(x, z) == SurfaceType.LAND:
+                    return x, z
+        return float(x0), float(z0)
 
     def _make_target_at(self, x_m: float, z_m: float) -> Target:
         st = self._world.surface_type_at(float(x_m), float(z_m))
@@ -218,7 +236,7 @@ class PhysicsModel:
 
     @property
     def max_overload_g(self) -> float:
-        return 15.0
+        return 15.9
 
     @property
     def touchdown_v_land_mps(self) -> float:
@@ -246,6 +264,7 @@ class PhysicsModel:
 
     @property
     def chute_jettison_max_alt_m(self) -> float:
+        """Номинальная высота сброса по ТЗ в конфиге (для API/подсказок; не гейт симулятора)."""
         return float(self._cfg.parachute_jettison_max_alt_m)
 
     # -------------------------
@@ -530,19 +549,10 @@ class PhysicsModel:
     def can_main(self) -> bool:
         return (not self.main_deployed) and self.drogue_deployed and (self.altitude_m < self.main_max_alt_m)
 
-    def _science_elapsed_ok_for_chute_jettison(self) -> bool:
-        if not self.main_deployed or self._t_main_deployed_s is None:
-            return False
-        return (self.time_s - self._t_main_deployed_s) >= float(self._cfg.science_descent_min_s)
-
     @property
     def can_chute_jettison(self) -> bool:
-        return (
-            (not self.chute_jettisoned)
-            and self.main_deployed
-            and (self.altitude_m < self.chute_jettison_max_alt_m)
-            and self._science_elapsed_ok_for_chute_jettison()
-        )
+        """Разрешение на сброс купола: только логика цепочки (основной уже раскрыт). Высоту задаёт автопилот / игрок."""
+        return (not self.chute_jettisoned) and self.main_deployed
 
     def request_heatshield_jettison(self) -> bool:
         if not self.can_heatshield_jettison:
@@ -762,7 +772,13 @@ class PhysicsModel:
             v_rel_vert_mps=self.air_rel_speed_vert_mps,
         )
         m = self.m_total_kg
-        f_grav_vert = -m * self.g_titan_mps2
+        g_titan = float(self.g_titan_mps2)
+        if (
+            (not self._heatshield_jettisoned)
+            and float(self.atm_density_kg_m3) < float(self._cfg.body.entry_low_density_rho_kg_m3)
+        ):
+            g_titan *= float(self._cfg.body.entry_low_density_gravity_scale)
+        f_grav_vert = -m * g_titan
         f_thrust_vert = self.thrust_n
         f_vert = float(f_grav_vert + fv + f_thrust_vert)
         q_dyn = 0.5 * float(self.atm_density_kg_m3) * float(vmag * vmag)
@@ -772,7 +788,7 @@ class PhysicsModel:
         # Proper (specific) acceleration: non-gravitational part of F/m — what a 3-axis
         # accelerometer / crew "g" approximates. Horizontal: only drag; vertical: drag+thrust
         # (gravity removed: a_vert − f_grav/m = a_vert + g_titan with constant g, +up).
-        g_t = float(self.g_titan_mps2)
+        g_t = g_titan
         ap_x = float(a_x)
         ap_z = float(a_z)
         ap_vert = float(a_vert + g_t)
@@ -852,8 +868,27 @@ class PhysicsModel:
 
     @property
     def g_load(self) -> float:
-        """Load factor: |a_proper| / g0 (Earth); a_proper excludes local gravity (free fall → ~0)."""
-        return float(self.accel_mag_mps2) / float(self.g0_mps2)
+        """Load factor: |a_proper| / g0 (Earth); at contact, adds impact estimate |v|/τ (calibrated τ vs surface)."""
+        g0 = float(self.g0_mps2)
+        base = float(self.accel_mag_mps2) / g0
+        dt = float(self._last_physics_dt_s)
+        if dt > 0.0 and float(self.altitude_m) <= 0.0:
+            vx = float(self.speed_x_mps)
+            vz = float(self.speed_z_mps)
+            vv = float(self.vertical_speed_mps)
+            vm = float(math.sqrt(vx * vx + vz * vz + vv * vv))
+            if vm > 1e-9:
+                vref = float(self._cfg.impact_calib_touchdown_speed_mps)
+                gref = float(self._cfg.impact_calib_touchdown_g)
+                g0_eng = float(self._cfg.engine.g0_mps2)
+                tau_land = vref / (gref * g0_eng)
+                if self.surface_type_under_probe == SurfaceType.LAKE:
+                    tau0 = tau_land * float(self._cfg.impact_lake_tau_multiplier)
+                else:
+                    tau0 = tau_land
+                a_stop = vm / tau0
+                base = max(base, a_stop / g0)
+        return float(base)
 
     # -------------------------
     # derived: navigation/surface/phase
@@ -904,10 +939,16 @@ class PhysicsModel:
         dt = float(dt_s)
         if dt <= 0.0:
             return
+        self._last_physics_dt_s = dt
 
         # new tick; derived caches must be recomputed against current state
         self._invalidate_cache()
         self._advance_wind_gust(dt)
+
+        # Snapshot probe velocity immediately before the same Euler update (matches z += vv*dt).
+        self._vv_step_start_mps = float(self._vertical_speed_mps)
+        self._speed_x_step_start_mps = float(self._speed_x_mps)
+        self._speed_z_step_start_mps = float(self._speed_z_mps)
 
         # Explicit Euler: update position with velocity at step start, then v += a*dt.
         a_vert = float(self.accel_vert_mps2)
@@ -1003,23 +1044,7 @@ class PhysicsModel:
         self._speed_z_mps = 0.0
 
     def _check_end_conditions(self) -> None:
-        if self.g_load > self.max_overload_g:
-            self._fail("Overload > 15g")
-
-        if self.internal_temp_c < self.t_int_min_c:
-            self._fail(f"Internal temperature below Tmin ({self.t_int_min_c:.0f}C)")
-        if self.internal_temp_c > self.t_int_max_c:
-            self._fail(f"Internal temperature above Tmax ({self.t_int_max_c:.0f}C)")
-
-        if not self._heatshield_jettisoned:
-            t_fail = float(self._cfg.heatshield_thermal.skin_failure_temp_c)
-            if float(self._heatshield_skin_temp_c) >= t_fail:
-                self._fail(f"Heatshield thermal failure (T_skin >= {t_fail:.0f} C)")
-                self._result = SimResult.FAILURE
-
-        if self.fuel_kg <= 0.0 and self.altitude_m > 0.0 and self.engine_on:
-            self._fail("Fuel exhausted above ground")
-
+        # Terrain / landing first: touchdown can spike g_load; overload must not mask a soft landing.
         pen = float(self._cfg.terrain_penetration_fail_m)
         if self.altitude_m < -pen:
             self._fail("Terrain collision")
@@ -1036,6 +1061,7 @@ class PhysicsModel:
             v_crit_v = float(self._cfg.terrain_collision_v_vert_mps)
             v_crit_h = float(self._cfg.terrain_collision_v_hor_mps)
 
+            # Catastrophic impact: post-step speeds (same frame as touchdown).
             if v_vert >= v_crit_v or v_hor >= v_crit_h:
                 self._fail("Terrain collision")
                 self._result = SimResult.FAILURE
@@ -1044,15 +1070,29 @@ class PhysicsModel:
                 self._land_cleanup_touchdown()
                 return
 
-            ok_vert = v_vert < (self.touchdown_v_land_mps if surf == SurfaceType.LAND else self.touchdown_v_lake_mps)
-            ok_hor = v_hor < self.touchdown_v_hor_mps
-            if ok_vert and ok_hor and (not self.failed):
+            tol = float(self._cfg.touchdown_v_tol_mps)
+            # Worst of approach vs outcome: multi-substep frames can land on a tiny last dt with
+            # small pre-step speed while the same frame began faster; Euler can also spike v after step.
+            vv_pre = abs(self._vv_step_start_mps)
+            vv_post = abs(self.vertical_speed_mps)
+            v_vert_soft = max(vv_pre, vv_post)
+            h_pre = math.hypot(self._speed_x_step_start_mps, self._speed_z_step_start_mps)
+            h_post = float(self.horizontal_speed_mps)
+            v_hor_soft = max(h_pre, h_post)
+            v_lim = self.touchdown_v_land_mps if surf == SurfaceType.LAND else self.touchdown_v_lake_mps
+            ok_vert = v_vert_soft <= v_lim + tol
+            ok_hor = v_hor_soft <= self.touchdown_v_hor_mps + tol
+            if ok_vert and ok_hor:
                 if surf != self._target.surface_type:
                     self._fail("Wrong landing site (surface mismatch)")
+                    self._result = SimResult.FAILURE
+                elif self.failed:
+                    # Prior fault (e.g. overload): mission stays failed, no false "hard landing" label.
                     self._result = SimResult.FAILURE
                 else:
                     self._result = SimResult.SUCCESS
             else:
+                # Always record hard landing when soft limits are exceeded, even if _failed was already set.
                 self._fail(f"Hard landing ({surf.value})")
                 self._result = SimResult.FAILURE
 
@@ -1060,6 +1100,24 @@ class PhysicsModel:
                 self._water_landed = True
 
             self._land_cleanup_touchdown()
+            return
+
+        if self.g_load > self.max_overload_g:
+            self._fail(f"Overload > {self.max_overload_g:g}g")
+
+        if self.internal_temp_c < self.t_int_min_c:
+            self._fail(f"Internal temperature below Tmin ({self.t_int_min_c:.0f}C)")
+        if self.internal_temp_c > self.t_int_max_c:
+            self._fail(f"Internal temperature above Tmax ({self.t_int_max_c:.0f}C)")
+
+        if not self._heatshield_jettisoned:
+            t_fail = float(self._cfg.heatshield_thermal.skin_failure_temp_c)
+            if float(self._heatshield_skin_temp_c) >= t_fail:
+                self._fail(f"Heatshield thermal failure (T_skin >= {t_fail:.0f} C)")
+                self._result = SimResult.FAILURE
+
+        if self.fuel_kg <= 0.0 and self.altitude_m > 0.0 and self.engine_on:
+            self._fail("Fuel exhausted above ground")
 
 
 class _ThermalStateProxy:

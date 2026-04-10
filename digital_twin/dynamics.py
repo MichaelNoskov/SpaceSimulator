@@ -129,7 +129,8 @@ def drag_force_vector_n(
     Formula:
       F_drag = -1/2 * rho * Cd * A * |v| * v_vec
 
-    v_vec is air-relative velocity. Returns:
+    v_vec is air-relative velocity (horizontal and vertical); all components are damped together.
+    Returns:
     - (F_x, F_z, F_vert, |v|).
     """
 

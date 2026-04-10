@@ -178,10 +178,11 @@ def _vertex_color(
     wz = gz0 + j * step_z
     haze = (118.0, 92.0, 72.0)
     if st == "lake":
+        # Match render.py: Titan lake = liquid hydrocarbon, not blue water.
         shimmer = 0.06 * math.sin(t_anim * 1.8 + wx * 0.0085 + wz * 0.012)
-        br = 45.0 + shimmer * 20
-        bg = 105.0 + shimmer * 60
-        bb = 185.0 + shimmer * 30
+        br = 48.0 + shimmer * 18
+        bg = 40.0 + shimmer * 15
+        bb = 28.0 + shimmer * 8
         spec = max(0.0, math.sin(t_anim * 0.7 + wx * 0.00015)) ** 8 * 0.25
         if for_gl_lighting:
             lit2 = 0.62 + 0.38 * spec

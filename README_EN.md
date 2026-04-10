@@ -119,7 +119,7 @@ The UI is an **operator console**: instruments show the flight state; levers and
 ### Levers (heatshield and parachutes)
 
 - **Heatshield jettison** when **Mach** $M = v_{\mathrm{rel}} / a$ is below the limit (default $M < 2.5$, `heatshield_jettison_max_mach` in `digital_twin/config.py`). Blocked while hypersonic.
-- **Drogue** only **after** heatshield jettison. **Main** chute when $h < 160\ \mathrm{km}$ and drogue is already deployed. **Chute jettison** when $h < 2\ \mathrm{km}$, only with main deployed and after the **science descent** hold under the main canopy (default 2 h model time, `science_descent_min_s`). Altitude gates: `parachute_main_max_deploy_alt_m`, `parachute_jettison_max_alt_m` in `config`.
+- **Drogue** only **after** heatshield jettison. **Main** chute when $h < 160\ \mathrm{km}$ and drogue is already deployed. **Main canopy jettison** is allowed by physics whenever the main is deployed (player / autopilot). Release altitude per spec (**2 km**) or Huygens (**22 km**) is enforced in the **flight program** (`DEFAULT_SCRIPT` / `HUYGENS_SCRIPT`); `parachute_jettison_max_alt_m` in `config` is the nominal spec value for hints. Optional `science_descent_min_s` (default **0**). Main deploy ceiling: `parachute_main_max_deploy_alt_m`.
 - Default **Auto** issues `request_*` when the matching `can_*` is true (`DEFAULT_SCRIPT` in `flight_program/runner.py`).
 - A **green lamp** on a lever means the action is **currently allowed** by the safety rules.
 
@@ -267,7 +267,7 @@ A Huygens-like descent chain in the simulator’s terms.
 | 1 | **Entry (`entry`)** | High speed; $\rho$ grows downward; strong aerobraking. **$\rho(h), T(h), P(h)$**; **Huygens DWE wind table** shifts $\mathbf{v}_{\mathrm{rel}}$ and $\mathbf{F}_d$. Heatshield: rarefaction, blowing, and ablation on top of a $\rho$–$|v|$ stagnation proxy. Visuals: sky gradient, haze, clouds; heatshield jettison can spawn particles. |
 | 2 | **Heatshield jettison** | After $M$ drops: lower mass; new $C_d$ and area. |
 | 3 | **Drogue (`drogue_chute`)** | Large $C_d$ and $A$ — strong deceleration in dense air. |
-| 4 | **Main + science hold (`science_descent` / `main_chute`)** | Even larger area and $C_d$; minimum time under canopy before jettison. |
+| 4 | **Main (`main_chute`; optional `science_descent`)** | Larger area and $C_d$. Telemetry phase `science_descent` only if `science_descent_min_s` > 0. |
 | 5 | **Chute jettison, final descent** | Back to “bare” aero; **engine** (manual or auto) near the ground. |
 | 6 | **Touchdown** | Speed limits (higher vertical cap on liquid), overload, temperature, surface vs target, extreme impact / penetration under the terrain height model. |
 
@@ -282,7 +282,7 @@ A Huygens-like descent chain in the simulator’s terms.
 | `main.py` | Pygame loop, physics accumulator, `Renderer.draw` |
 | `digital_twin/model.py` | `PhysicsModel`: forces, integrator, landing, CSV, plot history |
 | `digital_twin/dynamics.py` | Drag, thrust, fuel, thermal, Euler helpers for `SimState` |
-| `digital_twin/config.py` | Body, engine, thermal, Mach and science-descent settings |
+| `digital_twin/config.py` | Body, engine, thermal, Mach; optional `science_descent_min_s` |
 | `digital_twin/models/atmosphere.py` | JSON table and exponential profile |
 | `digital_twin/models/wind.py` | Wind vs altitude |
 | `digital_twin/world.py` | Terrain and surface type |

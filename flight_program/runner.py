@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import math
 from typing import Any, Callable, Optional
 
@@ -8,53 +9,120 @@ from control.controller import Controller
 from digital_twin.model import PhysicsModel, SimResult
 
 DEFAULT_SCRIPT = """def tick(sim, ap):
-    # Safety gates are in sim.can_* (Mach, altitude, heatshield before drogue, science hold).
+    # ТЗ: сброс купола и работа двигателя ниже h < 2000 м. Симулятор: только can_* (цепочка систем).
+    SPEC_JET_BELOW_M = 2000.0
+    g = globals()
+    if not sim.chute_jettisoned:
+        g["_spec_had_chute"] = False
     if sim.can_heatshield_jettison:
         ap.request_heatshield_jettison()
     if sim.can_drogue:
         ap.request_drogue()
     if sim.can_main:
         ap.request_main()
-    if sim.can_chute_jettison:
+    if sim.can_chute_jettison and sim.altitude_m < SPEC_JET_BELOW_M:
         ap.request_chute_jettison()
-    if sim.altitude_m < sim.parachute_jettison_max_alt_m and sim.chute_jettisoned:
+    if sim.chute_jettisoned and sim.altitude_m < SPEC_JET_BELOW_M:
         ap.set_engine(True)
-        target_v = -20.0 if sim.altitude_m > 200.0 else -4.0
-        error = target_v - sim.vertical_speed_mps
-        cmd = ap.clamp(0.02 * error, 0.0, 1.0)
-        ap.set_throttle_slider(cmd)
+        if not g.get("_spec_had_chute", False):
+            g["_spec_eng_i"] = 0.0
+        g["_spec_had_chute"] = True
+        vv = float(sim.vertical_speed_mps)
+        h = float(sim.altitude_m)
+        tgt_v = -20.0 if h > 200.0 else -4.0
+        err = tgt_v - vv
+        acc = float(g.get("_spec_eng_i", 0.0))
+        acc = acc * 0.94 + err * 0.055
+        acc = max(-25.0, min(25.0, acc))
+        g["_spec_eng_i"] = acc
+        excess = max(0.0, abs(vv) - abs(tgt_v))
+        cmd = 0.22 * err + 0.06 * acc + 0.18 * (excess ** 1.12) + 0.004 * excess * excess
+        cmd = max(cmd, min(0.92, 0.14 + 0.035 * excess))
+        ap.set_throttle_slider(ap.clamp(cmd, 0.0, 1.0))
 """
+
+# HASI-class main chute release altitude (~22 km); enforced in HUYGENS_SCRIPT, not in PhysicsModel.
+HUYGENS_PARACHUTE_JETTISON_MAX_ALT_M: float = 22_000.0
 
 # Approximate Cassini–Huygens descent *timeline* (model time), not a replay of telemetry.
 # Real probe had no final rocket; this script still uses the simulator engine for soft landing.
-HUYGENS_SCRIPT = """def tick(sim, ap):
+# Tag enables Huygens template detection (# huygens_profile).
+HUYGENS_SCRIPT = """# huygens_profile
+def tick(sim, ap):
+    # Реальный профиль: сброс купола у ~22 км; финал — |Vvert|≈5 м/с. Симулятор: только can_*.
+    JET_BELOW_M = 22000.0
+    V_TOUCH_REF = 4.0
+    g = globals()
+    if not sim.chute_jettisoned:
+        g["_hg_had_chute"] = False
+
     # ~0–15 min: hypersonic entry; stay passive (no separations in the real early phase).
     if sim.time_s < 900:
         return
-    # Backshell / forward shield class release when Mach allows (same gate as ТЗ).
     if sim.can_heatshield_jettison:
         ap.request_heatshield_jettison()
-    # Pilot parachute a few tens of seconds after aeroshell (real ~17 s class delay).
     if sim.time_s >= 950 and sim.can_drogue:
         ap.request_drogue()
-    # Main canopy later in descent (order of ~30 min model time); altitude gates still apply.
     if sim.time_s >= 1800 and sim.can_main:
         ap.request_main()
-    if sim.can_chute_jettison:
+    if sim.can_chute_jettison and sim.altitude_m < JET_BELOW_M:
         ap.request_chute_jettison()
-    if sim.altitude_m < sim.parachute_jettison_max_alt_m and sim.chute_jettisoned:
-        ap.set_engine(True)
-        target_v = -20.0 if sim.altitude_m > 200.0 else -4.0
-        error = target_v - sim.vertical_speed_mps
-        cmd = ap.clamp(0.02 * error, 0.0, 1.0)
-        ap.set_throttle_slider(cmd)
+    if sim.chute_jettisoned and sim.altitude_m < JET_BELOW_M:
+        ENGINE_ON_BELOW_M =1000.0
+        h = float(sim.altitude_m)
+        vv = float(sim.vertical_speed_mps)
+        av = abs(vv)
+        if h > ENGINE_ON_BELOW_M:
+            ap.set_engine(False)
+            ap.set_throttle_slider(0.0)
+            g["_hg_thr"] = 0.0
+        else:
+            ap.set_engine(True)
+            if not g.get("_hg_had_chute", False):
+                g["_hg_thr"] = 0.0
+            g["_hg_had_chute"] = True
+            cmd = float(g.get("_hg_thr", 0.0))
+            over = max(0.0, av - V_TOUCH_REF)
+            # Целевая тяга от превышения скорости над 5 м/с (плавная кривая).
+            target = min(1.0, 0.04 + 0.034 * over + 0.0011 * over * over)
+            if av > V_TOUCH_REF:
+                n = 0
+                while cmd <= target - 1e-5 and n < 64:
+                    step = max(0.0035, (target - cmd) * 0.24)
+                    cmd = min(target, cmd + step)
+                    n += 1
+            else:
+                cmd = max(0.0, cmd * 0.88)
+            g["_hg_thr"] = cmd
+            ap.set_throttle_slider(ap.clamp(cmd, 0.0, 1.0))
 """
+
+
+def _normalize_flight_program_source(s: str) -> str:
+    return "\n".join(line.rstrip() for line in s.strip().splitlines())
+
+
+def _strip_huygens_profile_tag(s: str) -> str:
+    lines = s.strip().splitlines()
+    if lines and lines[0].strip() == "# huygens_profile":
+        lines = lines[1:]
+    return _normalize_flight_program_source("\n".join(lines))
+
+
+def is_huygens_flight_program(source: str) -> bool:
+    """True if source is the Huygens template or marked with # huygens_profile (first lines)."""
+    head = "\n".join(source.strip().splitlines()[:6])
+    if "# huygens_profile" in head:
+        return True
+    return _strip_huygens_profile_tag(source) == _strip_huygens_profile_tag(HUYGENS_SCRIPT)
+
 
 # Full identifiers for hint panel and Tab completion (longest first helps some UIs; sorted for display)
 SIM_API_COMPLETIONS: tuple[str, ...] = (
     "sim.parachute_jettison_max_alt_m",
     "sim.altitude_m",
     "sim.atm_pressure_bar",
+    "sim.g_load",
     "sim.can_chute_jettison",
     "sim.can_drogue",
     "sim.can_heatshield_jettison",
@@ -64,7 +132,6 @@ SIM_API_COMPLETIONS: tuple[str, ...] = (
     "sim.drogue_deployed",
     "sim.engine_on",
     "sim.fuel_kg",
-    "sim.g_load",
     "sim.heatshield_jettisoned",
     "sim.heatshield_skin_temp_c",
     "sim.horizontal_speed_mps",
@@ -88,6 +155,7 @@ AP_API_COMPLETIONS: tuple[str, ...] = (
 )
 
 _SAFE_BUILTINS: dict[str, Any] = {
+    "globals": builtins.globals,
     "abs": abs,
     "min": min,
     "max": max,

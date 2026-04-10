@@ -8,6 +8,7 @@ from typing import Tuple, Optional
 import numpy as np
 import pygame
 
+from digital_twin.config import BodyConfig
 from digital_twin.model import PhysicsModel, SimResult
 
 # --- Saturn / Sun in the sky (Titan) ------------------------------------------
@@ -25,7 +26,7 @@ _SATURN_SKY_V = 0.069
 _SATURN_GLOBAL_VISUAL_SCALE = 1.042
 _SATURN_DISTANCE_EXAGGERATE = 2.35
 # Gameplay: ~1.5× at typical entry altitude vs 1× on the ground (smoothstep); ref ≈ model start altitude.
-_SATURN_ENTRY_BOOST_ALT_REF_M = 1_270_000.0
+_SATURN_ENTRY_BOOST_ALT_REF_M = float(BodyConfig().entry_start_altitude_m)
 _SATURN_ENTRY_BOOST_MAX = 1.5
 # The sky gradient is drawn in `rect`; treat its vertical span as this elevation arc (artistic).
 _SKY_VERTICAL_EXTENT_DEG = 52.0
@@ -905,10 +906,11 @@ class Renderer:
                 tex = 0.92 + 0.16 * math.sin(wx * 0.0085) * math.cos(wz * 0.012)
 
                 if st == "lake":
+                    # Liquid hydrocarbon (methane/ethane): dark umber, not Earth-water blue.
                     shimmer = 0.06 * math.sin(self._t * 1.8 + wx * 0.0003 + wz * 0.0004)
-                    br = 45.0 + shimmer * 20
-                    bg = 105.0 + shimmer * 60
-                    bb = 185.0 + shimmer * 30
+                    br = 48.0 + shimmer * 18
+                    bg = 40.0 + shimmer * 15
+                    bb = 28.0 + shimmer * 8
                     spec = max(0.0, math.sin(self._t * 0.7 + wx * 0.00015)) ** 8 * 0.25
                     lit = 0.60 + 0.40 * lit + spec
                 else:
@@ -993,7 +995,7 @@ class Renderer:
                     if rrx > 1 and rry > 1 and ra > 4:
                         rs = pygame.Surface((rrx * 2 + 4, rry * 2 + 4), pygame.SRCALPHA)
                         pygame.draw.ellipse(
-                            rs, (180, 210, 235, ra),
+                            rs, (138, 124, 108, ra),
                             (2, 2, rrx * 2, rry * 2), max(1, int(cam_sc * 0.3)))
                         layer.blit(rs, (sp_sx - rrx - 2, sp_sy - rry - 2))
 
@@ -1082,7 +1084,7 @@ class Renderer:
                     self._particles.append((bx, by, float(self._rng.normal(0, 3)),
                                             float(self._rng.uniform(-25, -10)),
                                             float(self._rng.uniform(0.4, 1.0)),
-                                            (140, 190, 220)))
+                                            (92, 84, 74)))
 
         body_r = int(16 * scale)
         inner_color = (245, 245, 248)
@@ -1407,7 +1409,7 @@ class Renderer:
                         t=0.0,
                         dur=1.8,
                         scale=float(self._rng.uniform(0.3, 0.8)),
-                        color=(100, 160, 210),
+                        color=(88, 80, 72),
                     )
                 )
         self._was_water_landed = now_water
@@ -2027,7 +2029,7 @@ class Renderer:
             cys = surf.get_height() // 2
             # Fill blocks.
             land_r, land_g, land_b = 80.0, 55.0, 40.0
-            lake_r, lake_g, lake_b = 40.0, 80.0, 115.0
+            lake_r, lake_g, lake_b = 34.0, 28.0, 22.0
             rh_scale = rect.height / max(1, surf.get_height())
             rw_scale = rect.width / max(1, surf.get_width())
             inv_sample = 1.0 / sample_cell_m
