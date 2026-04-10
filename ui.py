@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
 from typing import Callable, NamedTuple, Optional
 
@@ -90,6 +91,7 @@ I18N = {
         "post_landing_plots": "Телеметрия полёта",
         "plot_h_km": "Высота, км",
         "plot_v_vert": "Верт. скорость, м/с",
+        "plot_v_vert_abs": "|Верт. скорость|, м/с",
         "plot_g": "Перегрузка, g",
         "mission_dossier_btn": "Досье миссии",
         "mission_close": "Закрыть",
@@ -99,8 +101,13 @@ I18N = {
         "mission_no_plots": "Недостаточно точек телеметрии",
         "mission_plot_legend": (
             "Вертикаль: HS теплозащита, DR тормозной, MN основной, CJ сброс, EN двигатель (▼ выкл), "
-            "TGT цель. Подписи у линий — команды, дошедшие до модели (ручной и авто режим)."
+            "TGT цель. Подписи у линий — команды, дошедшие до модели (ручной и авто режим). "
+            "График времени: колёсико — сдвиг, Ctrl+колёсико — масштаб, [ ] — увеличить/уменьшить фрагмент, ползунок."
         ),
+        "mission_timeline_hint": "Время полёта (прокрутка / масштаб)",
+        "mission_plot_time_range": "Фрагмент: {a} — {b}  ·  миссия {total}",
+        "mission_plot_stats": "min {mn} · max {mx} · конец {end}",
+        "mission_x_axis_label": "время от старта",
         "mission_axis_t": "Время полёта",
         "plot_evt_hs": "HS · теплозащита",
         "plot_evt_dr": "DR · тормозной",
@@ -175,6 +182,7 @@ I18N = {
         "post_landing_plots": "Flight telemetry",
         "plot_h_km": "Altitude, km",
         "plot_v_vert": "Vertical speed, m/s",
+        "plot_v_vert_abs": "|Vertical speed|, m/s",
         "plot_g": "G-load, g",
         "mission_dossier_btn": "Mission dossier",
         "mission_close": "Close",
@@ -184,8 +192,13 @@ I18N = {
         "mission_no_plots": "Not enough telemetry samples",
         "mission_plot_legend": (
             "Markers: HS heatshield, DR drogue, MN main, CJ jettison, EN engine (▼ off), "
-            "TGT map target. Labels are commands applied to the model (manual and auto)."
+            "TGT map target. Labels are commands applied to the model (manual and auto). "
+            "Timeline: wheel = pan, Ctrl+wheel = zoom, [ ] = zoom in/out, scrollbar."
         ),
+        "mission_timeline_hint": "Mission time (scroll / zoom)",
+        "mission_plot_time_range": "View: {a} – {b}  ·  mission {total}",
+        "mission_plot_stats": "min {mn} · max {mx} · end {end}",
+        "mission_x_axis_label": "time from launch",
         "mission_axis_t": "Mission time",
         "plot_evt_hs": "HS · heatshield",
         "plot_evt_dr": "DR · drogue",
@@ -206,6 +219,8 @@ class _MissionReportGeom(NamedTuple):
     plot0: pygame.Rect
     plot1: pygame.Rect
     plot2: pygame.Rect
+    plot_scroll: pygame.Rect
+    plots_union: pygame.Rect
 
 
 @dataclass
@@ -403,6 +418,12 @@ class UI:
         self.esc_menu_open: bool = False
         self.flight_program_editor_open: bool = False
         self.mission_report_open: bool = False
+        # Mission dossier: visible time window on plots (same coords as xs = t - t0).
+        self._mission_view_lo: float = 0.0
+        self._mission_view_hi: float = 1.0
+        self._mission_timeline_reset: bool = True
+        self._mission_scroll_drag: bool = False
+        self._mission_scroll_grab: Optional[float] = None
         self._quit_requested: bool = False
         self._toast_until_ms: int = 0
         self._toast_key: str = "lever_denied"
@@ -659,6 +680,24 @@ class UI:
                 return True
             self._toggle_esc_menu()
             return True
+        if self.mission_report_open and c.model.result != SimResult.RUNNING:
+            hist = c.model.telemetry_history
+            if len(hist) >= 2:
+                t_total = max(1e-9, float(hist[-1]["t_s"]) - float(hist[0]["t_s"]))
+                span = max(1e-9, float(self._mission_view_hi) - float(self._mission_view_lo))
+                center = 0.5 * (float(self._mission_view_lo) + float(self._mission_view_hi))
+                if sc == pygame.KSCAN_LEFTBRACKET:
+                    new_span = max(t_total * 1e-4, min(t_total, span * 0.75))
+                    self._mission_view_lo = center - 0.5 * new_span
+                    self._mission_view_hi = center + 0.5 * new_span
+                    self._mission_timeline_clamp(t_total)
+                    return True
+                if sc == pygame.KSCAN_RIGHTBRACKET:
+                    new_span = min(t_total, max(t_total * 1e-4, span * (4.0 / 3.0)))
+                    self._mission_view_lo = center - 0.5 * new_span
+                    self._mission_view_hi = center + 0.5 * new_span
+                    self._mission_timeline_clamp(t_total)
+                    return True
         if sc == pygame.KSCAN_R:
             self._request_restart()
             return True
@@ -802,6 +841,63 @@ class UI:
         if self.time_scale_slider.handle_event(event):
             return
 
+        if self.mission_report_open and c.model.result != SimResult.RUNNING:
+            hist = c.model.telemetry_history
+            if len(hist) >= 2:
+                t0 = float(hist[0]["t_s"])
+                t_total = max(1e-9, float(hist[-1]["t_s"]) - t0)
+                g = self._mission_report_geometry()
+                plots_band = g.plots_union.union(g.plot_scroll)
+                mp = pygame.mouse.get_pos()
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if g.plot_scroll.collidepoint(event.pos):
+                        thumb = self._mission_timeline_thumb_rect(g.plot_scroll, t_total)
+                        span = max(1e-9, float(self._mission_view_hi) - float(self._mission_view_lo))
+                        rem = max(1e-9, t_total - span)
+                        room = max(1, g.plot_scroll.width - thumb.width - 4)
+                        if thumb.collidepoint(event.pos):
+                            self._mission_scroll_drag = True
+                            self._mission_scroll_grab = float(event.pos[0] - thumb.left)
+                            return
+                        else:
+                            u = float(event.pos[0] - g.plot_scroll.left - 2) / max(1, g.plot_scroll.width - 4)
+                            u = float(np.clip(u, 0.0, 1.0))
+                            self._mission_view_lo = u * (t_total - span)
+                            self._mission_view_hi = self._mission_view_lo + span
+                            self._mission_timeline_clamp(t_total)
+                        return
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self._mission_scroll_drag = False
+                    self._mission_scroll_grab = None
+                if event.type == pygame.MOUSEMOTION and self._mission_scroll_drag and self._mission_scroll_grab is not None:
+                    tr = g.plot_scroll
+                    thumb = self._mission_timeline_thumb_rect(tr, t_total)
+                    span = max(1e-9, float(self._mission_view_hi) - float(self._mission_view_lo))
+                    rem = max(1e-9, t_total - span)
+                    room = max(1, tr.width - thumb.width - 4)
+                    thumb_left = float(event.pos[0]) - self._mission_scroll_grab
+                    u = (thumb_left - tr.left - 2) / max(1e-9, float(room))
+                    u = float(np.clip(u, 0.0, 1.0))
+                    self._mission_view_lo = u * rem
+                    self._mission_view_hi = self._mission_view_lo + span
+                    self._mission_timeline_clamp(t_total)
+                    return
+                if event.type == pygame.MOUSEWHEEL and plots_band.collidepoint(mp):
+                    dy = int(getattr(event, "y", 0))
+                    span = max(1e-9, float(self._mission_view_hi) - float(self._mission_view_lo))
+                    center = 0.5 * (float(self._mission_view_lo) + float(self._mission_view_hi))
+                    if pygame.key.get_mods() & (pygame.KMOD_CTRL | pygame.KMOD_META):
+                        z = 1.12 if dy > 0 else 1.0 / 1.12
+                        new_span = max(t_total * 1e-4, min(t_total, span * z))
+                        self._mission_view_lo = center - 0.5 * new_span
+                        self._mission_view_hi = center + 0.5 * new_span
+                    else:
+                        pan = 0.06 * span * (-1.0 if dy > 0 else 1.0)
+                        self._mission_view_lo += pan
+                        self._mission_view_hi += pan
+                    self._mission_timeline_clamp(t_total)
+                    return
+
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if c.model.result != SimResult.RUNNING:
                 if self.mission_report_open:
@@ -818,6 +914,7 @@ class UI:
                     return
                 if self.mission_report_btn_rect.collidepoint(event.pos):
                     self.mission_report_open = True
+                    self._mission_timeline_reset = True
                     return
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -2245,15 +2342,20 @@ class UI:
         plot_w = inner.right - px - 4
         avail_h = content_bot - content_top
         plot_gap = int(8 * scale)
-        plot_h = max(40, (avail_h - 2 * plot_gap) // 3)
+        scroll_h = int(14 * scale)
+        gap_below_plots = int(6 * scale)
+        plot_h = max(36, (avail_h - 2 * plot_gap - scroll_h - gap_below_plots) // 3)
         p0 = pygame.Rect(px, content_top, plot_w, plot_h)
         p1 = pygame.Rect(px, content_top + plot_h + plot_gap, plot_w, plot_h)
         p2 = pygame.Rect(px, content_top + 2 * (plot_h + plot_gap), plot_w, plot_h)
+        scroll_y = p2.bottom + gap_below_plots
+        plot_scroll = pygame.Rect(px, scroll_y, plot_w, scroll_h)
+        plots_union = p0.union(p1).union(p2)
         bw = int(np.clip(168 * scale, 96, 220))
         bh = int(36 * scale)
         restart_btn = pygame.Rect(inner.right - bw - 4, inner.bottom - bh - 6, bw, bh)
         close_btn = pygame.Rect(restart_btn.left - bw - 12, restart_btn.top, bw, bh)
-        return _MissionReportGeom(panel, close_btn, restart_btn, photo, p0, p1, p2)
+        return _MissionReportGeom(panel, close_btn, restart_btn, photo, p0, p1, p2, plot_scroll, plots_union)
 
     def _draw_mission_dossier_button(self, surf: pygame.Surface, c: Controller) -> None:
         if c.model.result == SimResult.RUNNING or self.mission_report_open:
@@ -2372,6 +2474,152 @@ class UI:
         full = self._merge_plot_markers(log_m, st_m) if log_m else st_m
         return [(a, b, c, e) for a, b, c, _, e in full]
 
+    @staticmethod
+    def _mission_downsample_series(
+        xs: list[float],
+        ys: list[float],
+        max_pts: int,
+        mode: str,
+    ) -> tuple[list[float], list[float]]:
+        """Reduce points for drawing long missions; preserves peaks (max) or extrema (minmax)."""
+        n = min(len(xs), len(ys))
+        if n <= max_pts or max_pts < 16:
+            return xs, ys
+        xa = np.asarray(xs[:n], dtype=np.float64)
+        ya = np.asarray(ys[:n], dtype=np.float64)
+        if mode == "line":
+            idx = np.unique(np.linspace(0, n - 1, min(max_pts, n), dtype=int))
+            return [float(xa[i]) for i in idx], [float(ya[i]) for i in idx]
+        nb_bins = max(1, max_pts // 2) if mode == "minmax" else max_pts
+        out_x: list[float] = []
+        out_y: list[float] = []
+        for b in range(nb_bins):
+            i0 = (b * n) // nb_bins
+            i1 = ((b + 1) * n) // nb_bins
+            i1 = max(i0 + 1, min(i1, n))
+            sl = slice(i0, i1)
+            if mode == "max":
+                j = i0 + int(np.argmax(ya[sl]))
+                out_x.append(float(xa[j]))
+                out_y.append(float(ya[j]))
+            else:  # minmax — altitude envelope
+                jmin = i0 + int(np.argmin(ya[sl]))
+                jmax = i0 + int(np.argmax(ya[sl]))
+                if float(xa[jmin]) <= float(xa[jmax]):
+                    out_x.extend([float(xa[jmin]), float(xa[jmax])])
+                    out_y.extend([float(ya[jmin]), float(ya[jmax])])
+                else:
+                    out_x.extend([float(xa[jmax]), float(xa[jmin])])
+                    out_y.extend([float(ya[jmax]), float(ya[jmin])])
+        return out_x, out_y
+
+    def _mission_timeline_clamp(self, t_total: float) -> None:
+        t_total = max(1e-9, float(t_total))
+        span = float(self._mission_view_hi) - float(self._mission_view_lo)
+        if span >= t_total - 1e-9:
+            self._mission_view_lo = 0.0
+            self._mission_view_hi = t_total
+            return
+        span = max(1e-9, min(span, t_total))
+        lo = float(np.clip(float(self._mission_view_lo), 0.0, t_total - span))
+        self._mission_view_lo = lo
+        self._mission_view_hi = lo + span
+
+    def _draw_mission_timeline_scrubber(
+        self,
+        surf: pygame.Surface,
+        track: pygame.Rect,
+        t_total: float,
+    ) -> None:
+        ink = (28, 42, 68)
+        fill = (200, 196, 180)
+        hi = (228, 224, 212)
+        pygame.draw.rect(surf, hi, track, border_radius=4)
+        pygame.draw.rect(surf, ink, track, width=1, border_radius=4)
+        if t_total <= 1e-9:
+            return
+        span = float(self._mission_view_hi) - float(self._mission_view_lo)
+        if span >= t_total - 1e-9:
+            th = max(4, track.height - 4)
+            tr = pygame.Rect(track.left + 2, track.centery - th // 2, track.width - 4, th)
+            pygame.draw.rect(surf, fill, tr, border_radius=3)
+            return
+        frac_w = max(0.08, span / t_total)
+        thumb_w = max(18, int(frac_w * track.width))
+        room = max(1, track.width - thumb_w - 4)
+        rem = max(1e-9, t_total - span)
+        pos = float(self._mission_view_lo) / rem
+        tx = int(track.left + 2 + pos * room)
+        tx = int(np.clip(tx, track.left + 2, track.right - thumb_w - 2))
+        th = max(4, track.height - 4)
+        tr = pygame.Rect(tx, track.centery - th // 2, thumb_w, th)
+        pygame.draw.rect(surf, fill, tr, border_radius=3)
+        pygame.draw.rect(surf, ink, tr, width=1, border_radius=3)
+
+    def _mission_timeline_thumb_rect(self, track: pygame.Rect, t_total: float) -> pygame.Rect:
+        span = float(self._mission_view_hi) - float(self._mission_view_lo)
+        if t_total <= 1e-9 or span >= t_total - 1e-9:
+            return pygame.Rect(track.left + 2, track.top + 2, track.width - 4, track.height - 4)
+        frac_w = max(0.08, span / t_total)
+        thumb_w = max(18, int(frac_w * track.width))
+        room = max(1, track.width - thumb_w - 4)
+        rem = max(1e-9, t_total - span)
+        pos = float(self._mission_view_lo) / rem
+        tx = int(track.left + 2 + pos * room)
+        tx = int(np.clip(tx, track.left + 2, track.right - thumb_w - 2))
+        th = max(4, track.height - 4)
+        return pygame.Rect(tx, track.centery - th // 2, thumb_w, th)
+
+    @staticmethod
+    def _nice_y_axis(lo: float, hi: float, max_ticks: int = 7) -> tuple[float, float, list[float]]:
+        """Round Y limits to readable tick step; returns (y_min, y_max, tick values)."""
+        if hi < lo:
+            lo, hi = hi, lo
+        span = hi - lo
+        if span < 1e-30:
+            lo -= 1e-6
+            hi += 1e-6
+            span = hi - lo
+        raw = span / max(3, max_ticks - 1)
+        exp = math.floor(math.log10(max(raw, 1e-30)))
+        base = 10.0**exp
+        step = base
+        for mul in (1.0, 2.0, 2.5, 5.0, 10.0):
+            cand = mul * base
+            if cand >= raw * 0.82:
+                step = cand
+                break
+        else:
+            step = 10.0 * base
+        y0 = math.floor(lo / step) * step
+        y1 = math.ceil(hi / step) * step
+        if y1 <= y0 + 1e-30:
+            y1 = y0 + step
+        ticks: list[float] = []
+        t = y0
+        for _ in range(40):
+            if t > y1 + step * 1e-6:
+                break
+            ticks.append(float(round(t, 12)))
+            t += step
+        return y0, y1, ticks
+
+    @staticmethod
+    def _dashed_hline(
+        surf: pygame.Surface,
+        y: int,
+        x0: int,
+        x1: int,
+        color: tuple[int, int, int],
+        dash: int = 5,
+        gap: int = 4,
+    ) -> None:
+        x = x0
+        while x < x1:
+            xe = min(x + dash, x1)
+            pygame.draw.line(surf, color, (x, y), (xe, y), 1)
+            x = xe + gap
+
     def _draw_plot_blueprint(
         self,
         surf: pygame.Surface,
@@ -2382,84 +2630,151 @@ class UI:
         color: tuple[int, int, int],
         events: Optional[list[tuple[float, tuple[int, int, int], int, str]]] = None,
         y_tick_fmt: Callable[[float], str] | None = None,
+        *,
+        y_span_min: float = 0.0,
+        y_include_zero: bool = False,
+        x_window: Optional[tuple[float, float]] = None,
+        series_downsample: Optional[str] = None,
+        max_plot_points: int = 12000,
+        subtitle: Optional[str] = None,
+        show_x_axis_caption: bool = False,
     ) -> None:
         events = events or []
         yfmt = y_tick_fmt or (lambda v: f"{v:.2f}")
         paper = (228, 224, 212)
-        grid_maj = (200, 196, 180)
-        grid_min = (216, 212, 200)
+        grid_h = (210, 206, 198)
+        grid_v = (218, 214, 206)
         ink = (28, 42, 68)
+        muted = (88, 82, 76)
         pygame.draw.rect(surf, paper, rect, border_radius=4)
         pygame.draw.rect(surf, ink, rect, width=2, border_radius=4)
-        inner = rect.inflate(-10, -22)
-        inner.y += 12
-        axis_h = max(44, int(50 * self.ui_scale))
-        y_axis_w = max(44, int(50 * self.ui_scale))
-        plot_inner = pygame.Rect(
-            inner.left + y_axis_w,
-            inner.top,
-            max(12, inner.width - y_axis_w - 4),
-            max(12, inner.height - axis_h),
-        )
+        fs_h = self.font_small.get_height()
+        head_gap = 5
 
-        step = max(8, int(12 * self.ui_scale))
-        gx = plot_inner.left
-        while gx <= plot_inner.right:
-            pygame.draw.line(
-                surf,
-                grid_min if (gx - plot_inner.left) % (step * 2) else grid_maj,
-                (gx, plot_inner.top),
-                (gx, plot_inner.bottom),
-                1,
-            )
-            gx += step
-        gy = plot_inner.top
-        while gy <= plot_inner.bottom:
-            pygame.draw.line(
-                surf,
-                grid_min if (gy - plot_inner.top) % (step * 2) else grid_maj,
-                (plot_inner.left, gy),
-                (plot_inner.right, gy),
-                1,
-            )
-            gy += step
-        cap = self._cached_render(self.font_small, title.upper(), ink)
-        surf.blit(cap, (rect.left + 6, rect.top + 3))
-        n = min(len(xs), len(ys))
+        wxs = list(xs)
+        wys = list(ys)
+        xv0: Optional[float] = None
+        xv1: Optional[float] = None
+        if x_window is not None:
+            xv0 = float(x_window[0])
+            xv1 = float(x_window[1])
+            if xv1 < xv0:
+                xv0, xv1 = xv1, xv0
+            if len(wxs) > 0:
+                i0 = bisect.bisect_left(wxs, xv0)
+                i1 = bisect.bisect_right(wxs, xv1)
+                i1 = max(i0 + 1, min(i1, len(wxs)))
+                wxs = wxs[i0:i1]
+                wys = wys[i0:i1]
+        n0 = min(len(wxs), len(wys))
+        if n0 < 2:
+            return
+        wys_stats = list(wys)
+        st_min = float(min(wys_stats))
+        st_max = float(max(wys_stats))
+        st_end = float(wys_stats[-1])
+        if series_downsample:
+            wxs, wys = self._mission_downsample_series(wxs, wys, max_plot_points, series_downsample)
+            n = min(len(wxs), len(wys))
+        else:
+            n = n0
         if n < 2:
             return
-        ymin = float(min(ys[:n]))
-        ymax = float(max(ys[:n]))
+        ymin = float(min(wys[:n]))
+        ymax = float(max(wys[:n]))
         if abs(ymax - ymin) < 1e-9:
-            ymin -= 1.0
-            ymax += 1.0
+            c = ymin
+            half = max(abs(c) * 0.02, 1e-9)
+            if y_span_min > 0.0:
+                half = max(half, y_span_min * 0.5)
+            else:
+                half = max(half, 1e-3)
+            ymin, ymax = c - half, c + half
         span_y = ymax - ymin
         pad_y = max(span_y * 0.08, 1e-6)
         ymin -= pad_y
         ymax += pad_y
-        xl0 = float(xs[0])
-        xl1 = float(xs[n - 1])
+        if y_span_min > 0.0 and (ymax - ymin) < y_span_min:
+            mid = 0.5 * (ymin + ymax)
+            ext = 0.5 * y_span_min
+            ymin, ymax = mid - ext, mid + ext
+        if y_include_zero:
+            ymin = min(ymin, 0.0)
+        ymin, ymax, y_ticks = self._nice_y_axis(ymin, ymax, max_ticks=7)
+        if x_window is not None and xv0 is not None and xv1 is not None:
+            xl0, xl1 = xv0, xv1
+        else:
+            xl0 = float(wxs[0])
+            xl1 = float(wxs[n - 1])
         if abs(xl1 - xl0) < 1e-9:
             xl0 -= 0.5
             xl1 += 0.5
 
+        mw = 0
+        for yv in y_ticks:
+            tlw = self._cached_render(self.font_small, yfmt(yv), ink).get_width()
+            mw = max(mw, tlw)
+        y_axis_w = int(np.clip(mw + 20, 48, 132))
+
+        stats_txt = self.t("mission_plot_stats").format(mn=yfmt(st_min), mx=yfmt(st_max), end=yfmt(st_end))
+        y_head = rect.top + 6
+        cap = self._cached_render(self.font_small, title.upper(), ink)
+        surf.blit(cap, (rect.left + 6, y_head))
+        y_head += fs_h + head_gap
+        if subtitle:
+            sub = self._cached_render(self.font_small, subtitle, muted)
+            surf.blit(sub, (rect.left + 6, y_head))
+            y_head += fs_h + head_gap
+        st_surf = self._cached_render(self.font_small, stats_txt, muted)
+        surf.blit(st_surf, (rect.left + 6, y_head))
+        y_head += fs_h + 8
+
+        x_tick_h = fs_h + 8
+        x_caption_h = (fs_h + 6) if show_x_axis_caption else 0
+        axis_h = 10 + x_tick_h + x_caption_h
+        inner_top = y_head
+        inner_left = rect.left + 5
+        inner_w = rect.width - 10
+        inner_bottom = rect.bottom - 6 - axis_h
+        inner = pygame.Rect(inner_left, inner_top, inner_w, max(12, inner_bottom - inner_top))
+        plot_inner = pygame.Rect(
+            inner.left + y_axis_w,
+            inner.top,
+            max(12, inner.width - y_axis_w - 4),
+            inner.height,
+        )
+
+        def _y_to_px(yv: float) -> int:
+            return int(plot_inner.bottom - (float(yv) - ymin) / max(1e-30, (ymax - ymin)) * plot_inner.height)
+
         def _x_to_px(t_rel: float) -> int:
             return int(plot_inner.left + (float(t_rel) - xl0) / (xl1 - xl0) * plot_inner.width)
 
-        ny = 5
-        for k in range(ny + 1):
-            yv = ymin + (ymax - ymin) * (k / float(ny))
-            ty = (yv - ymin) / (ymax - ymin)
-            py = int(plot_inner.bottom - ty * plot_inner.height)
+        for yv in y_ticks:
+            py = _y_to_px(yv)
+            if plot_inner.top <= py <= plot_inner.bottom:
+                pygame.draw.line(surf, grid_h, (plot_inner.left, py), (plot_inner.right, py), 1)
+        nt = 6 if (xl1 - xl0) > 3600.0 else 5
+        for k in range(nt + 1):
+            t_rel = xl0 + (xl1 - xl0) * (k / float(nt))
+            px = _x_to_px(t_rel)
+            pygame.draw.line(surf, grid_v, (px, plot_inner.top), (px, plot_inner.bottom), 1)
+
+        for yv in y_ticks:
+            py = int(np.clip(_y_to_px(yv), plot_inner.top, plot_inner.bottom))
             pygame.draw.line(surf, ink, (plot_inner.left - 5, py), (plot_inner.left, py), 2)
             tl = self._cached_render(self.font_small, yfmt(yv), ink)
             lx = plot_inner.left - 8 - tl.get_width()
             surf.blit(tl, (lx, int(np.clip(py - tl.get_height() // 2, inner.top, inner.bottom - tl.get_height()))))
 
+        if ymin <= 0.0 <= ymax:
+            py0 = int(np.clip(_y_to_px(0.0), plot_inner.top, plot_inner.bottom))
+            self._dashed_hline(surf, py0, plot_inner.left, plot_inner.right, (150, 145, 138))
+
         pts: list[tuple[int, int]] = []
         for i in range(n):
-            tx = (float(xs[i]) - xl0) / (xl1 - xl0)
-            ty = (float(ys[i]) - ymin) / (ymax - ymin)
+            tx = (float(wxs[i]) - xl0) / (xl1 - xl0)
+            ty = (float(wys[i]) - ymin) / (ymax - ymin)
             px = int(plot_inner.left + tx * plot_inner.width)
             py = int(plot_inner.bottom - ty * plot_inner.height)
             pts.append((px, py))
@@ -2469,7 +2784,6 @@ class UI:
 
         ax_y = plot_inner.bottom
         pygame.draw.line(surf, ink, (plot_inner.left, ax_y), (plot_inner.right, ax_y), 2)
-        nt = 6 if (xl1 - xl0) > 3600.0 else 5
         tick_y = ax_y + 5
         for k in range(nt + 1):
             t_rel = xl0 + (xl1 - xl0) * (k / float(nt))
@@ -2478,6 +2792,10 @@ class UI:
             tl = self._cached_render(self.font_small, self._format_mission_elapsed(t_rel), ink)
             lx = int(np.clip(px - tl.get_width() // 2, plot_inner.left, max(plot_inner.left, plot_inner.right - tl.get_width())))
             surf.blit(tl, (lx, tick_y))
+        if show_x_axis_caption:
+            cap_y = tick_y + fs_h + 4
+            ax_cap = self._cached_render(self.font_small, self.t("mission_x_axis_label"), muted)
+            surf.blit(ax_cap, (plot_inner.left, cap_y))
 
         tri_s = max(5, int(6 * self.ui_scale))
         by_px: dict[int, list[tuple[tuple[int, int, int], int, str]]] = {}
@@ -2614,15 +2932,50 @@ class UI:
         if len(hist) >= 2:
             t0 = float(hist[0]["t_s"])
             xs = [float(p["t_s"]) - t0 for p in hist]
+            t_total = max(1e-9, float(xs[-1]))
+            if self._mission_timeline_reset:
+                self._mission_view_lo = 0.0
+                self._mission_view_hi = t_total
+                self._mission_timeline_reset = False
+            self._mission_timeline_clamp(t_total)
+            x_win = (float(self._mission_view_lo), float(self._mission_view_hi))
             markers = self._mission_graph_markers(hist, c)
-            series = (
-                ([float(p["altitude_m"]) / 1000.0 for p in hist], self.t("plot_h_km"), colors[0], lambda v: f"{v:.2f}"),
-                ([float(p["v_vert_mps"]) for p in hist], self.t("plot_v_vert"), colors[1], lambda v: f"{v:.0f}"),
-                ([float(p["g_load"]) for p in hist], self.t("plot_g"), colors[2], lambda v: f"{v:.2f}"),
+            # Landing-phase noise can make altitude_m slightly negative; graph shows h ≥ 0 only.
+            ys_alt_km = [max(0.0, float(p["altitude_m"]) / 1000.0) for p in hist]
+            ys_vv = [abs(float(p["v_vert_mps"])) for p in hist]
+            ys_g = [max(0.0, float(p["g_load"])) for p in hist]
+            blueprint = (
+                (ys_alt_km, self.t("plot_h_km"), colors[0], lambda v: f"{v:.2f}", "minmax", True),
+                (ys_vv, self.t("plot_v_vert_abs"), colors[1], lambda v: f"{v:.0f}", "line", False),
+                (ys_g, self.t("plot_g"), colors[2], lambda v: f"{v:.2f}", "max", True),
+            )
+            rng = self.t("mission_plot_time_range").format(
+                a=self._format_mission_elapsed(float(self._mission_view_lo)),
+                b=self._format_mission_elapsed(float(self._mission_view_hi)),
+                total=self._format_mission_elapsed(t_total),
             )
             for i, pr in enumerate(plots):
-                ys, ptitle, col, yfmt = series[i]
-                self._draw_plot_blueprint(surf, pr, xs, ys, ptitle, col, markers, yfmt)
+                ys, ptitle, col, yfmt, ds, y0 = blueprint[i]
+                self._draw_plot_blueprint(
+                    surf,
+                    pr,
+                    xs,
+                    ys,
+                    ptitle,
+                    col,
+                    markers,
+                    yfmt,
+                    y_span_min=0.0,
+                    y_include_zero=y0,
+                    x_window=x_win,
+                    series_downsample=ds,
+                    max_plot_points=12000,
+                    subtitle=rng if i == 0 else None,
+                    show_x_axis_caption=(i == 2),
+                )
+            hint = self._cached_render(self.font_small, self.t("mission_timeline_hint"), (90, 85, 78))
+            surf.blit(hint, (g.plot_scroll.left, g.plot_scroll.top - hint.get_height() - 2))
+            self._draw_mission_timeline_scrubber(surf, g.plot_scroll, t_total)
         else:
             empty = self._cached_render(self.font_small, self.t("mission_no_plots"), (80, 60, 45))
             surf.blit(empty, (g.plot0.left + 8, g.plot0.top + 8))

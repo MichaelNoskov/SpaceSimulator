@@ -62,7 +62,8 @@ class PhysicsModel:
         # Procedural world (terrain + lakes), deterministic from seed.
         self._world = WorldGen(seed=int(seed))
 
-        self._telemetry_history: Deque[dict[str, float]] = deque(maxlen=15000)
+        # Full mission timeline for dossier plots (unbounded; do not drop early samples).
+        self._telemetry_history: list[dict[str, float]] = []
         # (sim_time_s, tag_id, detail) — successful commands for mission plots (auto + manual).
         self._plot_action_log: Deque[Tuple[float, str, str]] = deque(maxlen=12000)
         self._tick_id = 0
@@ -768,7 +769,14 @@ class PhysicsModel:
         a_vert = f_vert / m
         a_x = float(fx) / m
         a_z = float(fz) / m
-        a_mag = float(math.sqrt(a_vert * a_vert + a_x * a_x + a_z * a_z))
+        # Proper (specific) acceleration: non-gravitational part of F/m — what a 3-axis
+        # accelerometer / crew "g" approximates. Horizontal: only drag; vertical: drag+thrust
+        # (gravity removed: a_vert − f_grav/m = a_vert + g_titan with constant g, +up).
+        g_t = float(self.g_titan_mps2)
+        ap_x = float(a_x)
+        ap_z = float(a_z)
+        ap_vert = float(a_vert + g_t)
+        a_proper_mag = float(math.sqrt(ap_x * ap_x + ap_z * ap_z + ap_vert * ap_vert))
         self._set_cached(
             "forces",
             {
@@ -781,7 +789,7 @@ class PhysicsModel:
                 "a_vert_mps2": float(a_vert),
                 "a_x_mps2": float(a_x),
                 "a_z_mps2": float(a_z),
-                "a_mag_mps2": float(a_mag),
+                "a_mag_mps2": float(a_proper_mag),
             },
         )
 
@@ -835,6 +843,7 @@ class PhysicsModel:
 
     @property
     def accel_mag_mps2(self) -> float:
+        """Magnitude of proper (specific) acceleration [m/s²], not raw |F_total|/m."""
         cached = self._get_cached("forces")
         if cached is None:
             self._compute_forces_cached()
@@ -843,6 +852,7 @@ class PhysicsModel:
 
     @property
     def g_load(self) -> float:
+        """Load factor: |a_proper| / g0 (Earth); a_proper excludes local gravity (free fall → ~0)."""
         return float(self.accel_mag_mps2) / float(self.g0_mps2)
 
     # -------------------------

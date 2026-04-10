@@ -2,12 +2,53 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Tuple, Optional
 
 import numpy as np
 import pygame
 
 from digital_twin.model import PhysicsModel, SimResult
+
+# --- Saturn / Sun in the sky (Titan) ------------------------------------------
+# Target: visible planet+rings ≈ 1/9 of sky panel height at **surface**; sprite bbox is larger (padding).
+# Angular size ∝ 1/D; D ≈ (a − R_Titan) − h with h = altitude (Saturn-facing radial, flat model).
+# Ref: https://science.nasa.gov/solar-system/planets/saturn/saturn-moons/titan/
+_SATURN_VISIBLE_SKY_FRACTION = 1.0 / 9.0
+_SATURN_SPRITE_FILL = 0.48
+_TITAN_ORBIT_SEMI_MAJOR_M = 1_221_870_000.0  # ~1221870 km
+_TITAN_RADIUS_MEAN_M = 2_574_730.0  # ~2574.7 km
+# Fixed screen anchor for Saturn (no libration / drift).
+_SATURN_SKY_U = 0.265
+_SATURN_SKY_V = 0.069
+# Slight artistic boost: overall size (~4%) + stronger “grows while high” vs raw physics (~2.3× the Δθ).
+_SATURN_GLOBAL_VISUAL_SCALE = 1.042
+_SATURN_DISTANCE_EXAGGERATE = 2.35
+# Gameplay: ~1.5× at typical entry altitude vs 1× on the ground (smoothstep); ref ≈ model start altitude.
+_SATURN_ENTRY_BOOST_ALT_REF_M = 1_270_000.0
+_SATURN_ENTRY_BOOST_MAX = 1.5
+# The sky gradient is drawn in `rect`; treat its vertical span as this elevation arc (artistic).
+_SKY_VERTICAL_EXTENT_DEG = 52.0
+# Titan orbital period ≈ 15.945 d (synchronous rotation); sky motion uses model time_s.
+_TITAN_ORBIT_PERIOD_S = 15.945 * 24.0 * 3600.0
+# Sun from Titan: d ≈ Saturn heliocentric distance ~9.54 AU → angular diameter ~0.056°
+# (R☉ / d; ~1/9.5 of Earth's ~0.53°). Flux ~1/90 of 1 AU — still bright but heavily attenuated by haze.
+_SUN_ANGULAR_DIAMETER_DEG = 0.056
+# Initial sky angle Sun vs subsaturn meridian (visual).
+_SUN_SKY_PHASE0_RAD = 1.05
+# Surface reference density (kg/m³); matches `digital_twin.config.TitanBody.rho_surface_kg_m3`.
+_TITAN_RHO_SURFACE_REF_KG_M3 = 5.9
+# Cloud advection: drift [px/frame] ≈ (wind − probe)·px_per_m·dt·_CLOUD_ADVECT_SCALE (tuned for readability).
+_CLOUD_ADVECT_SCALE = 100.0
+# Low-pass gusts so cloud motion does not jitter frame-to-frame (large inertia vs probe).
+_CLOUD_WIND_SMOOTH_TAU_S = 3.5
+# Per-shape haze variants (same wind; stacked decks differ in silhouette + transparency).
+_HAZE_VARIANTS_PER_SHAPE = 3
+_HAZE_SHAPE_COUNT = 5
+# Sun nameplate: show without hover for the first N seconds of sim time, then hover-only.
+_SKY_SUN_LABEL_INTRO_S = 14.0
+_SKY_LABEL_BELOW_GAP = 10
+_SKY_LABEL_OUTLINE_PX = 2
 
 
 @dataclass
@@ -34,11 +75,11 @@ class Camera:
 
 @dataclass
 class CloudLayer:
-    alt_m: float
-    speed_scale: float
-    offset_x_px: float
-    # blob tuple:
-    # (x_px, alt_m, yoff_px, speed_jit, alpha_mul, scale, wob_phase, sprite)
+    """One atmospheric deck: `shape_kind` selects silhouette family; `deck_alpha` scales layer opacity."""
+    shape_kind: int
+    deck_alpha: float
+    ref_sprite: pygame.Surface
+    # blob: (x_px, alt_m, yoff_px, _unused, inst_alpha, scale, wob_phase, sprite)
     blobs: list[tuple[float, float, float, float, float, float, float, pygame.Surface]]
 
 
@@ -65,7 +106,9 @@ class Renderer:
         self._landing_cam_start_m: float = 1_480.0
         self._landing_cam_end_m: float = 520.0
         self._jettison_anim_t: Optional[float] = None
-        self._cloud_speed_boost: float = 100.0
+        # Smoothed (wx, wz) at probe altitude — one field for all clouds.
+        self._cloud_wind_smooth: tuple[float, float] = (0.0, 0.0)
+        # `_haze_pools` filled in `_make_cloud_layers` (do not assign [] after that).
         # Minimap cache for performance (procedural terrain is expensive to sample per frame).
         self._minimap_cache: Optional[pygame.Surface] = None
         self._minimap_cache_rect: Optional[pygame.Rect] = None
@@ -77,10 +120,24 @@ class Renderer:
         # Sky gradient cache: rebuild on resize or h/rho quantization step.
         self._sky_cache: Optional[pygame.Surface] = None
         self._sky_cache_key: Optional[tuple[int, int, int, int]] = None
-        # Reusable semi-transparent fog plane (no per-frame allocation).
+        # Vertical-gradient fog plane (cached; rebuild on size / coarse h·ρ).
         self._fog_surf: Optional[pygame.Surface] = None
-        self._fog_surf_size: tuple[int, int] = (0, 0)
-        self._fog_cache_key: Optional[tuple[int, int, int]] = None  # (w, h, alpha//3)
+        self._fog_grad_key: Optional[tuple[int, int, int, int, int]] = None
+        # Saturn in the sky (Titan view): optional data/saturn_sky.png or procedural fallback.
+        self._saturn_tex: Optional[pygame.Surface] = None
+        self._saturn_tex_key: Optional[int] = None
+        # One high-res sky sprite per conditions; scaled each frame to smoothed size (avoids cache jumps).
+        self._saturn_master: Optional[pygame.Surface] = None
+        self._saturn_master_key: Optional[tuple[int, int, int, int, int, int]] = None
+        # Entry-boost curve uses max( nominal ref, peak altitude this run ) so u=1 at mission top.
+        self._saturn_entry_peak_alt_m: Optional[float] = None
+        self._saturn_last_sim_time_s: float = -1.0
+        # Sun disk + haze bloom (quantized size cache).
+        self._sun_radial: Optional[pygame.Surface] = None
+        self._sun_radial_key: Optional[tuple[int, int, int]] = None
+        self._sky_sun_rect: Optional[pygame.Rect] = None
+        self._sky_saturn_rect: Optional[pygame.Rect] = None
+        self._celestial_label_font: Optional[pygame.font.Font] = None
         # Terrain profile layer (SRCALPHA) for smooth compositing without per-frame alloc.
         self._profile_layer: Optional[pygame.Surface] = None
         # When profile visible: probe screen (x,y) matches profile coords (touchdown = terrain line).
@@ -94,14 +151,19 @@ class Renderer:
         self._pennant_surf_size: tuple[int, int] = (0, 0)
         # 3D terrain grid cache (heightmap + surface types).
         self._tgrid_cache: Optional[dict] = None
-        self._tgrid_smooth_max_dh: float = 200.0
         # Water landing: splash rings + probe sinking.
         self._water_splash: Optional[dict] = None
         self._was_water_landed: bool = False
         self._sink_t: float = 0.0
 
     def migrate_from(self, prev: Renderer) -> None:
-        pass
+        if (prev.w, prev.h) != (self.w, self.h):
+            self._saturn_master = None
+            self._saturn_master_key = None
+            self._saturn_entry_peak_alt_m = None
+            self._saturn_last_sim_time_s = -1.0
+            self._cloud_wind_smooth = (0.0, 0.0)
+            self._celestial_label_font = None
 
     def handle_orbit_event(self, event: pygame.event.Event, model: PhysicsModel) -> bool:
         return False
@@ -145,9 +207,15 @@ class Renderer:
         self._update_camera(model, ui_rect)
         self._update_event_anims(model, dt=float(frame_dt))
 
+        self._sky_sun_rect = None
+        self._sky_saturn_rect = None
+
         self._draw_sky(screen, ui_rect, model)
+        self._draw_sun(screen, ui_rect, model)
+        self._draw_saturn(screen, ui_rect, model, frame_dt=float(frame_dt))
         self._draw_wind_clouds(screen, ui_rect, model, frame_dt)
         self._draw_fog(screen, ui_rect, model)
+        self._draw_celestial_labels(screen, ui_rect, model, ui)
         self._draw_ground(screen, ui_rect, model)
         self._draw_probe(screen, ui_rect, model)
         self._draw_event_frags(screen, ui_rect, model)
@@ -221,18 +289,93 @@ class Renderer:
         else:
             top, bottom = c_high_top, c_high_bot
 
-        haze = float(np.clip((rho / 5.9) ** 0.35, 0.0, 1.0))
+        haze = float(np.clip((rho / float(_TITAN_RHO_SURFACE_REF_KG_M3)) ** 0.35, 0.0, 1.0))
         milky = np.array([245, 205, 170], dtype=float)
         top = lerp(top, milky, 0.20 * haze)
         bottom = lerp(bottom, milky * 0.75, 0.28 * haze)
+        # Deeper in the atmosphere: stronger orange smog (Cassini “orange haze” imagery).
+        depth = float(np.clip((1.0 - min(h, 5_500.0) / 5_500.0), 0.0, 1.0))
+        smog = depth * float(np.clip((rho / 4.2) ** 0.55, 0.0, 1.15))
+        smog_col = np.array([255, 118, 42], dtype=float)
+        top = lerp(top, smog_col, 0.14 * smog)
+        bottom = lerp(bottom, smog_col * 0.82, 0.22 * smog)
         return top, bottom
+
+    @staticmethod
+    def _titan_celestial_haze(h_km: float, rho: float) -> tuple[float, tuple[int, int, int], float]:
+        """
+        Visibility and warm haze tint vs atmospheric density (primary) and slant path (secondary).
+        Extinction scales with ρ/ρ₀ (ρ₀ ≈ surface); altitude only nudges path length near the ground.
+        Returns (alpha scale 0..1, RGB multiply for BLEND_RGBA_MULT, sharpness of disk 0..1).
+        """
+        rho0 = float(_TITAN_RHO_SURFACE_REF_KG_M3)
+        rho_r = float(np.clip(rho / max(rho0, 1e-9), 0.0, 2.4))
+        low = float(np.clip(1.0 - h_km / 2_800.0, 0.0, 1.0))
+        tau = 0.92 * rho_r * (1.0 + 0.28 * low)
+        vis = 0.14 + 0.86 * float(np.exp(-1.05 * tau))
+        vis = float(np.clip(vis, 0.16, 1.0))
+        o = float(np.clip((rho_r ** 0.62) * (0.78 + 0.22 * low), 0.0, 1.0))
+        tint = (
+            int(np.clip(255 - 22 * o, 150, 255)),
+            int(np.clip(248 - 52 * o, 105, 255)),
+            int(np.clip(218 - 98 * o, 78, 255)),
+        )
+        sharp = float(np.clip(1.0 - 0.42 * rho_r - 0.06 * low, 0.62, 1.0))
+        return vis, tint, sharp
+
+    @staticmethod
+    def _titan_sun_uv(t_s: float) -> tuple[float, float]:
+        """Sun only: synchronous Titan; ~one circuit per orbit vs Saturn meridian."""
+        T = float(_TITAN_ORBIT_PERIOD_S)
+        phi = 2.0 * math.pi * (t_s / T)
+        psi = phi + float(_SUN_SKY_PHASE0_RAD)
+        u_sun = 0.5 + 0.48 * math.cos(psi + 0.06)
+        v_sun = 0.048 + 0.13 * max(-0.2, math.sin(psi + 0.52))
+        return u_sun, v_sun
+
+    @staticmethod
+    def _saturn_distance_angular_scale(altitude_m: float) -> float:
+        """
+        θ ∝ 1/D with D ≈ D0−h; embellish (raw−1) so approach is readable in-game (still capped).
+        """
+        d0 = float(_TITAN_ORBIT_SEMI_MAJOR_M) - float(_TITAN_RADIUS_MEAN_M)
+        h = max(0.0, float(altitude_m))
+        dh = d0 - h
+        lo = max(0.15 * d0, 1e6)
+        if dh < lo:
+            dh = lo
+        raw = float(d0 / dh)
+        ex = float(_SATURN_DISTANCE_EXAGGERATE)
+        vis = 1.0 + ex * (raw - 1.0)
+        return float(np.clip(vis, 1.0, 1.14))
+
+    @staticmethod
+    def _uv_to_sky_xy(rect: pygame.Rect, u: float, v: float, tex_w: int, tex_h: int) -> tuple[int, int]:
+        margin_x = int(rect.width * 0.04 + 8)
+        margin_t = int(rect.height * 0.06 + 6)
+        usable = max(1, rect.width - tex_w - 2 * margin_x)
+        x = rect.left + margin_x + int(float(u) * usable)
+        y = rect.top + margin_t + int(float(v) * rect.height)
+        return x, y
+
+    @staticmethod
+    def _uv_to_sky_xy_center(rect: pygame.Rect, u: float, v: float, tex_w: int, tex_h: int) -> tuple[int, int]:
+        """(u,v) = position of sprite center; blit top-left so scaling is about the disk center."""
+        margin_x = int(rect.width * 0.04 + 8)
+        margin_t = int(rect.height * 0.06 + 6)
+        margin_b = margin_t
+        inner_w = max(1, rect.width - 2 * margin_x)
+        inner_h = max(1, rect.height - margin_t - margin_b)
+        cx = rect.left + margin_x + tex_w // 2 + int(float(u) * max(0, inner_w - tex_w))
+        cy = rect.top + margin_t + tex_h // 2 + int(float(v) * max(0, inner_h - tex_h))
+        return cx - tex_w // 2, cy - tex_h // 2
 
     def _draw_sky(self, screen: pygame.Surface, rect: pygame.Rect, model: PhysicsModel) -> None:
         h = max(0.0, float(model.altitude_m))
         rho = float(model.atm_density_kg_m3)
         # Coarser quantization: on fast descent int(rho*500) would change almost every frame —
         # full sky rebuild + scale would tank FPS and cause long stalls from alloc/GC.
-        qh = int(h // 900.0)
+        qh = int(h // 380.0) if h < 4_200.0 else int(h // 900.0)
         qr = int(rho * 80.0) // 4
         key = (rect.width, rect.height, qh, qr)
         if self._sky_cache is not None and self._sky_cache_key == key:
@@ -258,21 +401,319 @@ class Renderer:
         self._sky_cache_key = key
         screen.blit(scaled, rect.topleft)
 
+    def _saturn_sprite(self, max_w: int) -> pygame.Surface:
+        """Cached texture: optional data/saturn_sky.png, else procedural gas-giant + rings."""
+        key = max(48, max_w) // 8
+        if self._saturn_tex is not None and self._saturn_tex_key == key:
+            return self._saturn_tex
+
+        w = int(np.clip(max_w, 48, 640))
+        data_path = Path(__file__).resolve().parent / "data" / "saturn_sky.png"
+        surf: Optional[pygame.Surface] = None
+        if data_path.is_file():
+            try:
+                raw = pygame.image.load(str(data_path)).convert_alpha()
+                iw, ih = raw.get_size()
+                if iw > 0 and ih > 0:
+                    nh = max(40, int(w * ih / iw))
+                    surf = pygame.transform.smoothscale(raw, (w, nh))
+            except pygame.error:
+                surf = None
+        if surf is None:
+            surf = self._make_procedural_saturn_sprite(w)
+
+        self._saturn_tex = surf
+        self._saturn_tex_key = key
+        return surf
+
+    @staticmethod
+    def _saturn_target_height_px(
+        sky_h_px: float, h_km: float, rho: float, altitude_m: float, entry_boost_href_m: float
+    ) -> float:
+        """
+        Surface: base ~1/9 panel; entry boost 1→1.5 with u = alt / entry_boost_href_m (smoothstep).
+        Cap scales with panel height — no fixed 620px ceiling (that caused a size plateau on tall windows).
+        """
+        fill = max(0.28, min(float(_SATURN_SPRITE_FILL), 0.75))
+        base = float(sky_h_px) * (float(_SATURN_VISIBLE_SKY_FRACTION) / fill)
+        dist_scale = Renderer._saturn_distance_angular_scale(altitude_m)
+        haze = float(np.clip(rho / float(_TITAN_RHO_SURFACE_REF_KG_M3), 0.0, 1.25))
+        vis = 1.0 - 0.01 * haze
+        href = max(1.0, float(entry_boost_href_m))
+        u = float(np.clip(float(altitude_m) / href, 0.0, 1.0))
+        st = u * u * (3.0 - 2.0 * u)
+        entry_boost = 1.0 + (float(_SATURN_ENTRY_BOOST_MAX) - 1.0) * st
+        th = base * dist_scale * vis * float(_SATURN_GLOBAL_VISUAL_SCALE) * entry_boost
+        cap = float(sky_h_px) * 0.52
+        return float(np.clip(th, 24.0, cap))
+
+    @staticmethod
+    def _make_procedural_saturn_sprite(w: int) -> pygame.Surface:
+        """Disk + tilted rings (view from Titan; not to scale)."""
+        h = max(int(w * 0.42), 72)
+        s = pygame.Surface((w, h), pygame.SRCALPHA)
+        cx, cy = w // 2, int(h * 0.48)
+        rp = max(8, int(w * 0.105))
+        rw, rh = int(rp * 3.15), max(6, int(rp * 0.52))
+        ring_rect = pygame.Rect(cx - rw // 2, cy - rh // 2, rw, rh)
+        ring = pygame.Surface((rw, rh), pygame.SRCALPHA)
+        pygame.draw.ellipse(ring, (195, 168, 130, 95), ring.get_rect())
+        pygame.draw.ellipse(ring, (165, 125, 95, 150), ring.get_rect(), width=max(1, rp // 16))
+        s.blit(ring, ring_rect.topleft)
+
+        pygame.draw.ellipse(s, (235, 205, 155), (cx - rp, cy - rp, 2 * rp, 2 * rp))
+        pygame.draw.ellipse(s, (200, 155, 105), (cx - rp, cy - rp, 2 * rp, 2 * rp), width=max(1, rp // 18))
+        pygame.draw.arc(s, (110, 75, 52), (cx - rp, cy - rp, 2 * rp, 2 * rp), 0.35 * math.pi, 0.95 * math.pi, max(2, rp // 7))
+
+        shine = pygame.Surface((2 * rp, 2 * rp), pygame.SRCALPHA)
+        pygame.draw.ellipse(shine, (255, 230, 190, 55), (rp // 3, rp // 5, rp, int(rp * 0.75)))
+        s.blit(shine, (cx - rp, cy - rp))
+
+        front = pygame.Surface((rw, rh), pygame.SRCALPHA)
+        pygame.draw.arc(front, (225, 200, 165, 130), front.get_rect(), 3.7, 5.9, max(2, rp // 9))
+        s.blit(front, ring_rect.topleft)
+        return s
+
+    @staticmethod
+    def _sun_disk_diameter_px(
+        sky_h_px: float, h_km: float, rho: float, sharp: float
+    ) -> tuple[float, float]:
+        """
+        Physical angular diameter at ~9.5 AU; sub-pixel → clamp for a visible core.
+        Returns (d_core_px, bloom_scale). Low `sharp` widens halo vs crisp disk (aerosol scatter).
+        Uses fixed window height (not camera zoom).
+        """
+        span = float(_SKY_VERTICAL_EXTENT_DEG)
+        ang = float(_SUN_ANGULAR_DIAMETER_DEG)
+        haze = float(np.clip(rho / float(_TITAN_RHO_SURFACE_REF_KG_M3), 0.0, 1.25))
+        sh = float(np.clip(sharp, 0.62, 1.0))
+        ang_eff = ang * (1.0 + 0.10 * haze) * sh
+        d_phys = float(sky_h_px) * (ang_eff / span)
+        d_core = max(2.0, min(d_phys, float(sky_h_px) * 0.035))
+        bloom = 4.2 + 2.8 * haze + 0.22 * float(np.clip(1.0 - h_km / 900.0, 0.0, 1.0))
+        bloom += 2.1 * (1.0 - sh)
+        return d_core, bloom
+
+    def _sun_radial_sprite(self, r_core: int, r_glow: int, qr: int, vis_b: int) -> pygame.Surface:
+        """Disk + soft corona; cached on quantized radii + haze / visibility bucket."""
+        key = (r_core, r_glow, qr, vis_b)
+        if self._sun_radial is not None and self._sun_radial_key == key:
+            return self._sun_radial
+        r_glow = max(r_core + 2, r_glow)
+        n = 2 * r_glow + 1
+        s = pygame.Surface((n, n), pygame.SRCALPHA)
+        cx = cy = r_glow
+        rc = float(max(1, r_core))
+        rg = float(r_glow)
+        for y in range(n):
+            for x in range(n):
+                d = math.hypot(float(x - cx), float(y - cy))
+                if d <= rc:
+                    rr = int(255 - 8 * (d / max(rc, 1.0)))
+                    gg = int(245 - 18 * (d / max(rc, 1.0)))
+                    bb = int(215 - 35 * (d / max(rc, 1.0)))
+                    s.set_at((x, y), (rr, gg, bb, 255))
+                elif d >= rg:
+                    continue
+                else:
+                    t = float((d - rc) / max(rg - rc, 1.0))
+                    # Smooth edge; stronger falloff than rings (point source).
+                    a = int(255 * ((1.0 - t) ** 2.2))
+                    if a < 6:
+                        continue
+                    rr = int(255 - 40 * t)
+                    gg = int(210 - 50 * t)
+                    bb = int(140 - 40 * t)
+                    s.set_at((x, y), (rr, gg, bb, a))
+
+        self._sun_radial = s
+        self._sun_radial_key = key
+        return s
+
+    def _draw_sun(self, screen: pygame.Surface, rect: pygame.Rect, model: PhysicsModel) -> None:
+        """
+        Sun at ~9.5 AU: small disk (~0.06°); scattered halo in photochemical haze (Cassini).
+        Motion: synchronous lock keeps Saturn ~fixed; Sun moves ~360° per Titan orbit vs that meridian.
+        """
+        h_km = max(0.0, float(model.altitude_m) / 1000.0)
+        rho = float(model.atm_density_kg_m3)
+        qr = int(rho * 80.0) // 4
+        vis, tint, sharp = self._titan_celestial_haze(h_km, rho)
+        vis_b = int(vis * 14)
+
+        d_core, bloom_mul = self._sun_disk_diameter_px(float(self.h), h_km, rho, sharp)
+        r_core = max(1, int(round(0.5 * d_core)))
+        r_glow = int(max(float(r_core) * bloom_mul, float(r_core) + 5.0))
+        r_glow = min(r_glow, int(self.h * 0.22))
+
+        tex = self._sun_radial_sprite(r_core, r_glow, qr, vis_b)
+        tw, th = tex.get_size()
+
+        t_s = float(model.time_s)
+        u_sun, v_sun = self._titan_sun_uv(t_s)
+        x, y = self._uv_to_sky_xy_center(rect, u_sun, v_sun, tw, th)
+
+        dim = float(np.clip(0.38 + 0.62 * max(0.0, 1.0 - h_km / 1180.0), 0.38, 1.0))
+        a = int(np.clip(108 + 118 * dim, 78, 236))
+        a = int(np.clip(a * 0.76, 64, 236))
+        a = int(np.clip(a * vis, 42, 234))
+        out = tex.copy()
+        out.fill(tint, special_flags=pygame.BLEND_RGBA_MULT)
+        out.set_alpha(a)
+        screen.blit(out, (x, y))
+        self._sky_sun_rect = pygame.Rect(int(x), int(y), int(tw), int(th))
+
+    def _draw_saturn(self, screen: pygame.Surface, rect: pygame.Rect, model: PhysicsModel, frame_dt: float) -> None:
+        """
+        Fixed screen anchor; height tracks altitude every frame (no smoothing lag vs descent).
+        """
+        alt_m = max(0.0, float(model.altitude_m))
+        h_km = alt_m / 1000.0
+        rho = float(model.atm_density_kg_m3)
+        t_sim = float(model.time_s)
+        if t_sim < self._saturn_last_sim_time_s - 1e-3:
+            self._saturn_entry_peak_alt_m = None
+        self._saturn_last_sim_time_s = t_sim
+        if self._saturn_entry_peak_alt_m is None:
+            self._saturn_entry_peak_alt_m = alt_m
+        else:
+            self._saturn_entry_peak_alt_m = max(float(self._saturn_entry_peak_alt_m), alt_m)
+        entry_href = max(float(_SATURN_ENTRY_BOOST_ALT_REF_M), float(self._saturn_entry_peak_alt_m))
+
+        dim = float(np.clip(0.38 + 0.62 * max(0.0, 1.0 - h_km / 1180.0), 0.38, 1.0))
+        vis, tint, _sharp = self._titan_celestial_haze(h_km, rho)
+
+        sky_h = float(rect.height)
+        th_tgt = self._saturn_target_height_px(sky_h, h_km, rho, alt_m, entry_href)
+        th_cap = sky_h * 0.52
+        th_want = float(np.clip(th_tgt, 24.0, th_cap))
+        th_px = max(24, int(round(th_want)))
+
+        qr = int(rho * 80.0) // 4
+        vis_b = int(vis * 14)
+        master_h = int(np.clip(int(sky_h * 0.48), 140, 520))
+        # No altitude bucket in key — avoids spurious master rebuild / jumps (e.g. near 600 km).
+        mk = (master_h, qr, rect.width, rect.height, vis_b)
+        if self._saturn_master is None or self._saturn_master_key != mk:
+            tw_load = max(96, int(master_h * (512.0 / 215.0)))
+            tex0 = self._saturn_sprite(tw_load)
+            iw0, ih0 = tex0.get_size()
+            if ih0 <= 0:
+                self._sky_saturn_rect = None
+                return
+            tw_m = max(22, int(iw0 * float(master_h) / float(ih0)))
+            self._saturn_master = pygame.transform.smoothscale(tex0, (tw_m, master_h))
+            self._saturn_master_key = mk
+
+        mw, mh = self._saturn_master.get_size()
+        if mh <= 0:
+            self._sky_saturn_rect = None
+            return
+        tw_px = max(22, int(round(mw * float(th_px) / float(mh))))
+        tex = pygame.transform.smoothscale(self._saturn_master, (tw_px, th_px))
+        tw, th = tex.get_size()
+        u_sat = float(_SATURN_SKY_U)
+        v_sat = float(_SATURN_SKY_V)
+        x, y = self._uv_to_sky_xy_center(rect, u_sat, v_sat, tw, th)
+
+        a = int(np.clip(168 + 82 * dim, 118, 255))
+        a = int(np.clip(a * vis, 55, 252))
+        out = tex.copy()
+        out.fill(tint, special_flags=pygame.BLEND_RGBA_MULT)
+        out.set_alpha(a)
+        screen.blit(out, (x, y))
+        self._sky_saturn_rect = pygame.Rect(int(x), int(y), int(tw), int(th))
+
+    @staticmethod
+    def _celestial_name_strings(lang: str) -> tuple[str, str]:
+        if (lang or "RU").upper().startswith("EN"):
+            return "Sun", "Saturn"
+        return "Солнце", "Сатурн"
+
+    @staticmethod
+    def _render_outlined_label(
+        font: pygame.font.Font, text: str, fg: tuple[int, int, int], outline: tuple[int, int, int], ow: int
+    ) -> pygame.Surface:
+        core = font.render(text, True, fg)
+        w, h = core.get_size()
+        pad = ow * 2 + 2
+        surf = pygame.Surface((w + pad, h + pad), pygame.SRCALPHA)
+        otxt = font.render(text, True, outline)
+        for dx in range(-ow, ow + 1):
+            for dy in range(-ow, ow + 1):
+                if dx * dx + dy * dy > ow * ow + 0.5:
+                    continue
+                surf.blit(otxt, (ow + 1 + dx, ow + 1 + dy))
+        surf.blit(core, (ow + 1, ow + 1))
+        return surf
+
+    def _draw_celestial_labels(
+        self, screen: pygame.Surface, rect: pygame.Rect, model: PhysicsModel, ui: object
+    ) -> None:
+        """Sun: caption at intro + on hover. Saturn: caption on hover only. Outlined text below body."""
+        sun_r = self._sky_sun_rect
+        sat_r = self._sky_saturn_rect
+        if sun_r is None and sat_r is None:
+            return
+
+        lang = str(getattr(ui, "lang", "RU"))
+        sun_txt, sat_txt = self._celestial_name_strings(lang)
+        scale = float(getattr(ui, "ui_scale", 1.0))
+        if self._celestial_label_font is None:
+            self._celestial_label_font = pygame.font.SysFont("DejaVu Sans", max(13, int(14 * scale)))
+
+        font = self._celestial_label_font
+        fg = (248, 240, 220)
+        ol = (18, 14, 28)
+        pad = 14
+
+        mx, my = pygame.mouse.get_pos()
+        t_sim = float(model.time_s)
+        intro = t_sim < float(_SKY_SUN_LABEL_INTRO_S)
+
+        def blit_below(body: pygame.Rect, label: pygame.Surface) -> None:
+            r = label.get_rect()
+            r.midtop = (body.centerx, body.bottom + int(_SKY_LABEL_BELOW_GAP))
+            # Clip to sky panel
+            clip = screen.get_clip()
+            try:
+                screen.set_clip(rect)
+                screen.blit(label, r)
+            finally:
+                screen.set_clip(clip)
+
+        if sun_r is not None and rect.colliderect(sun_r):
+            hover = sun_r.inflate(pad, pad).collidepoint(mx, my)
+            if intro or hover:
+                surf = self._render_outlined_label(font, sun_txt, fg, ol, int(_SKY_LABEL_OUTLINE_PX))
+                blit_below(sun_r, surf)
+
+        if sat_r is not None and rect.colliderect(sat_r):
+            if sat_r.inflate(pad, pad).collidepoint(mx, my):
+                surf = self._render_outlined_label(font, sat_txt, fg, ol, int(_SKY_LABEL_OUTLINE_PX))
+                blit_below(sat_r, surf)
+
     def _draw_fog(self, screen: pygame.Surface, rect: pygame.Rect, model: PhysicsModel) -> None:
+        """Orange nitrogen haze: stronger near the bottom of the view and in denser air."""
         h = float(model.altitude_m)
         rho = float(model.atm_density_kg_m3)
-        base = np.clip(160 - (h / 2000.0), 0, 160)
-        dens = np.clip((rho / 1.5) * 80.0, 0, 80)
-        a = int(np.clip(base + dens, 0, 180))
-        if a <= 0:
-            return
-        key = (rect.width, rect.height, a // 3)
-        if self._fog_surf is None or self._fog_cache_key != key:
-            if self._fog_surf is None or self._fog_surf_size != (rect.width, rect.height):
-                self._fog_surf = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-                self._fog_surf_size = (rect.width, rect.height)
-            self._fog_surf.fill((200, 140, 90, a))
-            self._fog_cache_key = key
+        a_max = float(np.clip(42.0 + 0.062 * (2800.0 - min(h, 2800.0)) + rho * 1050.0, 18.0, 248.0))
+        qh = int(h // 650.0)
+        qr = int(rho * 100.0) // 3
+        qa = int(a_max) // 6
+        key = (rect.width, rect.height, qh, qr, qa)
+        if self._fog_surf is None or self._fog_grad_key != key:
+            hh = max(1, rect.height)
+            col = pygame.Surface((1, hh), pygame.SRCALPHA)
+            for y in range(hh):
+                t = y / max(hh - 1, 1)
+                al = min(255, int(a_max * (0.06 + 0.94 * (t**1.18))))
+                rr = int(188 + 42 * t)
+                gg = int(118 + 48 * t)
+                bb = int(72 + 38 * t)
+                col.set_at((0, y), (rr, gg, bb, al))
+            self._fog_surf = pygame.transform.smoothscale(col, (rect.width, rect.height))
+            self._fog_grad_key = key
         screen.blit(self._fog_surf, rect.topleft)
 
     def _draw_ground(self, screen: pygame.Surface, rect: pygame.Rect, model: PhysicsModel) -> None:
@@ -357,8 +798,8 @@ class Renderer:
                 if d > raw_max_dh:
                     raw_max_dh = d
         raw_max_dh = max(raw_max_dh, 80.0)
-        self._tgrid_smooth_max_dh += (raw_max_dh - self._tgrid_smooth_max_dh) * 0.06
-        max_dh = max(80.0, self._tgrid_smooth_max_dh)
+        # Use instantaneous range so vertical scale matches the current relief (smoothing caused drift vs blur).
+        max_dh = raw_max_dh
 
         h_px = min(cam_sc * 0.50, avail_h * 0.38 / max(1.0, max_dh))
 
@@ -509,10 +950,20 @@ class Renderer:
 
         # --- horizon silhouette (farthest row) ---
         far_pts = [proj(ix, NZ - 1) for ix in range(NX)]
+        # Blur softens the terrain upward; nudge the outline down so it meets the visible ridge.
+        horizon_dy = max(1, min(6, int(2 + rect.height * 0.0028)))
         hzc = (125, 95, 78, max(0, min(255, int(a255 * 0.80))))
-        for k in range(len(far_pts) - 1):
-            if _bt - 4 <= far_pts[k][1] <= _rb + 4:
-                pygame.draw.line(layer, hzc, far_pts[k], far_pts[k + 1], 2)
+        bt_l = max(0, _bt - rect.top)
+        clip_h = max(1, min(rect.height, _rb - rect.top) - bt_l)
+        prev_clip = layer.get_clip()
+        layer.set_clip(pygame.Rect(0, bt_l, rect.width, clip_h))
+        try:
+            for k in range(len(far_pts) - 1):
+                p0 = (far_pts[k][0], far_pts[k][1] + horizon_dy)
+                p1 = (far_pts[k + 1][0], far_pts[k + 1][1] + horizon_dy)
+                pygame.draw.line(layer, hzc, p0, p1, 2)
+        finally:
+            layer.set_clip(prev_clip)
 
         # --- probe shadow on terrain ---
         if alt < 300.0:
@@ -1142,132 +1593,278 @@ class Renderer:
         screen.blit(buf, rect.topleft)
 
     def _make_cloud_layers(self) -> list[CloudLayer]:
-        # Three semi-transparent cloud plans (parallax).
+        self._haze_pools = self._build_all_haze_pools()
         layers: list[CloudLayer] = []
-        for alt_m, speed_scale, seed in [
-            (6_000.0, 1.00, 1),   # near plan (fast)
-            (22_000.0, 0.62, 2),  # mid plan
-            (65_000.0, 0.36, 3),  # far plan (slow)
+        for shape_kind, deck_alpha, seed in [
+            (0, 0.42, 11),
+            (1, 0.54, 22),
+            (2, 0.58, 33),
+            (3, 0.54, 44),
+            (4, 0.68, 55),
         ]:
-            blobs = self._make_cloud_blobs(seed=seed)
-            layers.append(CloudLayer(alt_m=float(alt_m), speed_scale=float(speed_scale), offset_x_px=0.0, blobs=blobs))
+            da = float(deck_alpha)
+            blobs = self._make_cloud_blobs(seed=seed, shape_kind=shape_kind, deck_alpha=da)
+            pool = self._haze_pools[shape_kind]
+            layers.append(
+                CloudLayer(shape_kind=shape_kind, deck_alpha=da, ref_sprite=pool[0], blobs=blobs)
+            )
         return layers
 
-    def _make_cloud_sprite(self, rng: np.random.Generator) -> pygame.Surface:
-        # One "cloud": smooth, homogeneous blob (rocket-plume-like), not noisy/curly inside.
-        # 2x smaller clouds (performance + visibility)
-        w = int(rng.uniform(150, 260))
-        h = int(rng.uniform(90, 170))
-        surf = pygame.Surface((w, h), pygame.SRCALPHA)
-        base_color = (235, 220, 210)
+    @staticmethod
+    def _haze_blur_np(a: np.ndarray, passes: int) -> np.ndarray:
+        """Isotropic-ish smoothing (cardinals + diagonals) — avoids axis-aligned corners."""
+        x = np.asarray(a, dtype=np.float64)
+        for _ in range(passes):
+            c = (
+                np.roll(x, 1, 0)
+                + np.roll(x, -1, 0)
+                + np.roll(x, 1, 1)
+                + np.roll(x, -1, 1)
+            )
+            d = (
+                np.roll(np.roll(x, 1, 0), 1, 1)
+                + np.roll(np.roll(x, 1, 0), -1, 1)
+                + np.roll(np.roll(x, -1, 0), 1, 1)
+                + np.roll(np.roll(x, -1, 0), -1, 1)
+            )
+            x = (3.2 * x + c + 0.62 * d) / (3.2 + 4.0 + 4.0 * 0.62)
+        return np.clip(x, 0.0, 1.0)
 
-        def puff_oval(cx: int, cy: int, rx: int, ry: int, a: int) -> None:
-            for k in range(4):
-                rrx = max(2, int(rx * (1.0 - 0.18 * k)))
-                rry = max(2, int(ry * (1.0 - 0.18 * k)))
-                aa = max(0, int(a * (1.0 - 0.18 * k)))
-                pygame.draw.ellipse(surf, (*base_color, aa), pygame.Rect(cx - rrx, cy - rry, 2 * rrx, 2 * rry))
+    @staticmethod
+    def _haze_shape_envelope(shape_kind: int, gh: int, gw: int, rng: np.random.Generator) -> np.ndarray:
+        """Non-rectangular silhouettes: α→0 toward edges (organic mist, not a solid quad)."""
+        ii = np.linspace(0.0, 1.0, gh, dtype=np.float64)[:, None]
+        jj = np.linspace(0.0, 1.0, gw, dtype=np.float64)[None, :]
+        sk = int(shape_kind) % _HAZE_SHAPE_COUNT
 
-        alpha = int(rng.uniform(36, 62))
-        cx0, cy0 = w // 2, h // 2
-        # A few large overlapping ovals with similar alpha => homogeneous interior.
-        for _ in range(int(rng.integers(4, 7))):
-            cx = int(cx0 + rng.normal(0, w * 0.08))
-            cy = int(cy0 + rng.normal(0, h * 0.08))
-            rx = int(rng.uniform(w * 0.18, w * 0.30))
-            ry = int(rng.uniform(h * 0.18, h * 0.30))
-            puff_oval(cx, cy, rx, ry, alpha)
-        return surf
+        if sk == 0:
+            dx = (jj - 0.48) / (0.52 + 0.06 * rng.random())
+            dy = (ii - 0.48) / (0.48 + 0.05 * rng.random())
+            r2 = dx * dx + dy * dy
+            env = np.exp(-np.clip(r2, 0.0, None) / (0.42 + 0.08 * rng.random())) ** (
+                0.95 + 0.08 * rng.random()
+            )
+        elif sk == 1:
+            vy = np.sin(np.pi * ii) ** (0.88 + 0.08 * rng.random())
+            j0 = 0.45 + 0.08 * rng.random()
+            sig = 0.28 + 0.06 * rng.random()
+            hx = np.exp(-(((jj - j0) / sig) ** 2))
+            env = np.clip(vy * hx, 0.0, 1.0)
+        elif sk == 2:
+            t = jj * 0.72 + ii * 0.28
+            t0 = 0.38 + 0.12 * rng.random()
+            sig = 0.16 + 0.05 * rng.random()
+            ridge = np.exp(-(((t - t0) / sig) ** 2))
+            env = (np.sin(np.pi * ii) ** 0.78) * ridge * (0.55 + 0.45 * jj)
+            env = np.clip(env, 0.0, 1.0)
+        elif sk == 3:
+            g1 = np.exp(-(((ii - 0.36) ** 2 + (jj - 0.34) ** 2) / (0.055 + 0.02 * rng.random())))
+            g2 = np.exp(-(((ii - 0.58) ** 2 + (jj - 0.64) ** 2) / (0.048 + 0.02 * rng.random())))
+            env = np.clip(g1 + 0.82 * g2, 0.0, 1.0) ** (0.92 + 0.06 * rng.random())
+        else:
+            cx = 0.78 + 0.08 * rng.random()
+            cy = 0.22 + 0.08 * rng.random()
+            env = np.exp(-(((1.0 - jj) - cx) ** 2 + (ii - cy) ** 2) / (0.065 + 0.025 * rng.random()))
+            env *= np.sin(np.pi * ii) ** (0.62 + 0.12 * rng.random())
 
-    def _make_cloud_blobs(self, seed: int) -> list[tuple[float, float, float, float, float, float, float, pygame.Surface]]:
+        return np.clip(env, 0.0, 1.0)
+
+    def _make_haze_sheet(self, rng: np.random.Generator, shape_kind: int, variant: int) -> pygame.Surface:
+        """Noise × envelope → irregular silhouette; upscale keeps edges soft."""
+        sk = int(shape_kind) % _HAZE_SHAPE_COUNT
+        vi = int(variant) % max(1, _HAZE_VARIANTS_PER_SHAPE)
+        gw = int(36 + (vi % 4) * 8 + rng.integers(-2, 4))
+        gh = int(28 + (vi % 5) * 6 + rng.integers(-2, 4))
+        gw = max(26, min(80, gw))
+        gh = max(22, min(64, gh))
+
+        n = rng.random((gh, gw), dtype=np.float64)
+        n = Renderer._haze_blur_np(n, 8 + (vi % 4))
+        n = np.clip(n * float(rng.uniform(0.85, 1.14)), 0.0, 1.0)
+        n = np.power(n, 0.72 + 0.06 * float(sk))
+        env = Renderer._haze_shape_envelope(sk, gh, gw, rng)
+        env = Renderer._haze_blur_np(env, 5)
+        n = np.clip(n * env, 0.0, 1.0)
+        n = Renderer._haze_blur_np(n, 3)
+        n = np.power(np.clip(n, 0.0, 1.0), 0.92)
+
+        amp = 78.0 + 22.0 * float(vi % 4) + float(rng.uniform(-4.0, 14.0))
+        alpha = np.clip(np.power(n, 1.0 + 0.03 * float(sk)) * amp, 0.0, 178.0)
+
+        br = 192.0 + 26.0 * rng.random()
+        bg = 142.0 + 48.0 * rng.random()
+        bb = 102.0 + 42.0 * rng.random()
+        nr = np.clip(br + 44.0 * n, 0.0, 255.0).astype(np.uint8)
+        ng = np.clip(bg + 36.0 * n, 0.0, 255.0).astype(np.uint8)
+        nb = np.clip(bb + 28.0 * n, 0.0, 255.0).astype(np.uint8)
+
+        rgba = np.stack([nr, ng, nb, alpha.astype(np.uint8)], axis=-1)
+        small = pygame.image.frombuffer(
+            np.ascontiguousarray(rgba).tobytes(), (gw, gh), "RGBA"
+        ).copy()
+
+        if sk == 1:
+            tw = int(rng.uniform(520, 820))
+            th = int(rng.uniform(100, 190))
+        elif sk == 2:
+            tw = int(rng.uniform(420, 680))
+            th = int(rng.uniform(160, 280))
+        elif sk == 0:
+            tw = int(rng.uniform(420, 620))
+            th = int(rng.uniform(200, 340))
+        else:
+            tw = int(rng.uniform(460, 760))
+            th = int(rng.uniform(140, 270))
+        return pygame.transform.smoothscale(small, (tw, th))
+
+    def _build_all_haze_pools(self) -> list[list[pygame.Surface]]:
+        rng = np.random.default_rng(77102)
+        pools: list[list[pygame.Surface]] = []
+        for kind in range(_HAZE_SHAPE_COUNT):
+            pools.append(
+                [self._make_haze_sheet(rng, shape_kind=kind, variant=i) for i in range(_HAZE_VARIANTS_PER_SHAPE)]
+            )
+        return pools
+
+    def _make_cloud_blobs(
+        self, seed: int, shape_kind: int, deck_alpha: float
+    ) -> list[tuple[float, float, float, float, float, float, float, pygame.Surface]]:
         rng = np.random.default_rng(seed)
+        pool = self._haze_pools[shape_kind]
         blobs: list[tuple[float, float, float, float, float, float, float, pygame.Surface]] = []
-        # Seed a tiny pool; we will spawn/despawn around the camera dynamically.
         alt_max = 120_000.0
-        count = 2
+        count = 6
         for _ in range(count):
-            spr = self._make_cloud_sprite(rng)
-            # Spawn mostly across (and slightly beyond) the screen width for continuous wrap.
-            # Wind is positive in our profile, so bias spawn to the left so clouds cross the frame.
-            x = float(rng.uniform(-self.w * 0.4, self.w * 0.1))
+            spr0 = pool[int(rng.integers(0, len(pool)))]
+            x = float(rng.uniform(-self.w * 0.45, self.w * 0.12))
             u = float(rng.uniform(0.0, 1.0))
             alt_m = float((u**1.6) * alt_max)
-            # Keep vertical offsets tighter so more clouds stay in view.
-            yoff = float(rng.uniform(-self.h * 0.14, self.h * 0.14))
-            speed_jit = float(rng.uniform(0.75, 1.30))
-            a_mul = float(rng.uniform(0.75, 0.95))
-            scale = float(rng.uniform(1.10, 1.55))
+            yoff = float(rng.uniform(-self.h * 0.16, self.h * 0.12))
+            inst = float(rng.uniform(0.68, 1.0))
+            scale = float(rng.uniform(0.88, 1.58))
             wob_phase = float(rng.uniform(0.0, 2 * math.pi))
-            # Pre-scale once to avoid per-frame smoothscale cost.
-            sw = max(8, int(spr.get_width() * scale))
-            sh = max(8, int(spr.get_height() * scale))
-            spr2 = pygame.transform.smoothscale(spr, (sw, sh))
-            spr2.set_alpha(int(np.clip(255 * a_mul, 30, 255)))
-            blobs.append((x, alt_m, yoff, speed_jit, 1.0, 1.0, wob_phase, spr2))
+            sw = max(24, int(spr0.get_width() * scale))
+            sh = max(24, int(spr0.get_height() * scale))
+            spr2 = pygame.transform.smoothscale(spr0, (sw, sh))
+            combined = float(np.clip(float(deck_alpha) * inst, 0.22, 0.99))
+            spr2.set_alpha(int(np.clip(255 * combined, 32, 255)))
+            blobs.append((x, alt_m, yoff, 1.0, combined, scale, wob_phase, spr2))
         return blobs
 
+    def _spawn_haze_blob(
+        self,
+        layer: CloudLayer,
+        rect: pygame.Rect,
+        center_m: float,
+        span_m: float,
+        rng: np.random.Generator,
+        density_boost: float = 1.0,
+    ) -> tuple[float, float, float, pygame.Surface]:
+        pool = self._haze_pools[layer.shape_kind]
+        if not pool:
+            spr0 = pygame.Surface((120, 80), pygame.SRCALPHA)
+            spr0.fill((195, 160, 130, 22))
+            spr0.set_alpha(int(255 * np.clip(layer.deck_alpha * 0.62 * density_boost, 0.0, 1.0)))
+            return (
+                float(rng.uniform(rect.left, rect.right)),
+                float(np.clip(center_m - 0.55 * span_m, 0.0, 120_000.0)),
+                float(rng.uniform(-self.h * 0.08, self.h * 0.08)),
+                spr0,
+            )
+
+        spr0 = pool[int(rng.integers(0, len(pool)))]
+        scale = float(rng.uniform(0.85, 1.62))
+        inst = float(rng.uniform(0.62, 1.0))
+        sw = max(24, int(spr0.get_width() * scale))
+        sh = max(24, int(spr0.get_height() * scale))
+        spr = pygame.transform.smoothscale(spr0, (sw, sh))
+        db = float(np.clip(density_boost, 0.55, 1.45))
+        combined = float(np.clip(layer.deck_alpha * inst * db, 0.20, 0.99))
+        spr.set_alpha(int(np.clip(255 * combined, 28, 255)))
+
+        x = float(rng.uniform(rect.left - rect.width * 0.38, rect.right + rect.width * 0.08))
+        alt_m = float(
+            np.clip(center_m - 0.64 * span_m + rng.uniform(-0.12, 0.12) * span_m, 0.0, 120_000.0)
+        )
+        yoff = float(rng.uniform(-self.h * 0.18, self.h * 0.12))
+        if rng.random() < 0.32:
+            x += float(rng.normal(0.0, rect.width * 0.04))
+            alt_m = float(np.clip(alt_m + rng.normal(0.0, span_m * 0.022), 0.0, 120_000.0))
+        return (x, alt_m, yoff, spr)
+
     def _draw_wind_clouds(self, screen: pygame.Surface, rect: pygame.Rect, model: PhysicsModel, frame_dt: float) -> None:
-        # Clouds drift with wind profile and parallax.
-        # Performance constraints:
-        # - keep a small active set near the camera
-        # - spawn below (behind camera) shortly before entering the frame
-        # - cull after passing the camera (exit upward) to avoid drawing far away
+        # Stacked haze decks: same wind; draw back (faint) → front (denser).
         dt = float(frame_dt)
         center_m = float(self.camera.center_y_m)
-        # At very high altitudes, clouds should not be visible (and we skip all cloud work).
         if center_m > 95_000.0:
             return
         fall_speed = abs(float(model.vertical_speed_mps))
-        # Multiplier for all plans: faster descent => clouds move faster (sense of speed-up).
         speed_mul = float(np.clip(0.55 + 0.9 * (fall_speed / 250.0), 0.55, 1.75))
-        for layer in self._cloud_layers:
-            px_per_m = self.camera.scale_px_per_m
-            span_m = rect.height / max(1e-9, px_per_m)
+        rho = float(model.atm_density_kg_m3)
+        rho0 = float(_TITAN_RHO_SURFACE_REF_KG_M3)
+        density_f = float(np.clip((rho / max(rho0, 1e-9)) ** 0.38, 0.0, 1.35))
+        # Thicker, more visible haze as atmospheric ρ increases.
+        density_boost = float(np.clip(0.62 + 0.52 * min(density_f, 1.35), 0.62, 1.38))
 
-            # Keep a small active set per layer (spawn/despawn).
-            desired = 2
-            rng = self._rng
+        px_per_m = self.camera.scale_px_per_m
+        span_m = rect.height / max(1e-9, px_per_m)
+        v_probe_x = float(model.speed_x_mps)
+        alpha_w = float(1.0 - math.exp(-max(dt, 0.0) / max(_CLOUD_WIND_SMOOTH_TAU_S, 1e-3)))
+
+        h_probe = float(max(0.0, model.altitude_m))
+        wx_t, wz_t = model.wind_vec_mps_at(h_probe)
+        sm0, sm1 = self._cloud_wind_smooth
+        nwx = sm0 + alpha_w * (float(wx_t) - sm0)
+        nwz = sm1 + alpha_w * (float(wz_t) - sm1)
+        self._cloud_wind_smooth = (nwx, nwz)
+        v_rel_x = nwx - v_probe_x
+
+        base_desired = int(
+            np.clip(
+                round(
+                    2.4
+                    + 1.35 * density_f
+                    + 0.35 * (1.0 - min(center_m, 80_000.0) / 80_000.0)
+                    + 0.45 * min(density_boost, 1.25)
+                ),
+                3,
+                9,
+            )
+        )
+        rng = self._rng
+
+        decks = sorted(self._cloud_layers, key=lambda L: L.deck_alpha)
+        for layer in decks:
 
             def spawn_blob() -> tuple[float, float, float, float, float, float, float, pygame.Surface]:
-                # Spawn below the camera view so it "floats in" soon.
-                # Spawn across (and slightly beyond) the visible width so clouds actually appear.
-                x = float(rng.uniform(rect.left - rect.width * 0.20, rect.right - rect.width * 0.05))
-                alt_m = float(np.clip(center_m - 0.65 * span_m + rng.uniform(-0.10, 0.10) * span_m, 0.0, 120_000.0))
-                yoff = float(rng.uniform(-self.h * 0.12, self.h * 0.12))
-                s = float(rng.uniform(0.85, 1.20))
+                x, alt_m, yoff, spr = self._spawn_haze_blob(
+                    layer, rect, center_m, span_m, rng, density_boost
+                )
                 wob_phase = float(rng.uniform(0.0, 2 * math.pi))
-                # Reuse an existing sprite from this layer (already pre-scaled + alpha set).
-                # Fallback: never create raw unscaled sprites here (too expensive / wrong alpha).
-                spr = layer.blobs[0][7]
-                return (x, alt_m, yoff, s, 1.0, 1.0, wob_phase, spr)
+                return (x, alt_m, yoff, 1.0, 1.0, 1.0, wob_phase, spr)
 
-            # Ensure at least desired blobs exist.
+            desired = max(3, min(9, base_desired))
             while len(layer.blobs) < desired:
                 layer.blobs.append(spawn_blob())
 
-            new_blobs = []
-            for x, alt_m, yoff, s, a_mul, scale, wob_phase, spr in layer.blobs:
-                wind = float(model.wind_vec_mps_at(float(alt_m))[0])
-                base_dx = float(wind) * float(layer.speed_scale) * speed_mul * px_per_m * dt * self._cloud_speed_boost
-                x = x + base_dx * s
+            new_blobs: list[tuple[float, float, float, float, float, float, float, pygame.Surface]] = []
+            for x, alt_m, yoff, _sj, a_mul, scale, wob_phase, spr in layer.blobs:
+                base_dx = v_rel_x * speed_mul * px_per_m * dt * float(_CLOUD_ADVECT_SCALE)
+                x = x + base_dx
 
-                # render position
                 _sx, sy = self._world_to_screen(rect, model.pos_x_m, float(alt_m))
-                wob = 10.0 * math.sin(self._t * (0.30 + 0.18 * layer.speed_scale) + wob_phase + 0.004 * x)
+                wob = 5.5 * math.sin(self._t * 0.26 + wob_phase + 0.0025 * x)
                 yy = int(sy + yoff + wob)
 
-                # Despawn clouds after they pass the camera view (above), and don't keep off-screen far below.
-                if yy < rect.top - 220:
+                if yy < rect.top - 320:
                     continue
-                if yy > rect.bottom + 260:
+                if yy > rect.bottom + 340:
                     continue
 
-                # Only blit if in view horizontally (cheap cull).
                 if int(x) < rect.right and int(x) + spr.get_width() > rect.left:
                     screen.blit(spr, (int(x), yy))
-                new_blobs.append((x, alt_m, yoff, s, a_mul, scale, wob_phase, spr))
+                new_blobs.append((x, alt_m, yoff, 1.0, a_mul, scale, wob_phase, spr))
 
-            # Top up after despawn.
             while len(new_blobs) < desired:
                 new_blobs.append(spawn_blob())
             layer.blobs = new_blobs

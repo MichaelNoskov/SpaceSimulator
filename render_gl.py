@@ -155,20 +155,14 @@ def _vertex_color(
     ly: float,
     t_anim: float,
     for_gl_lighting: bool = False,
+    normal_override: Optional[tuple[float, float, float]] = None,
 ) -> tuple[float, float, float]:
     hc = grid_h[i][j]
     st = grid_st[i][j]
-    hr = grid_h[min(i + 1, nx - 1)][j]
-    hf = grid_h[i][min(j + 1, nz - 1)]
-    exag = 4.5
-    nxn = -(hr - hc) / max(1.0, step_x) * exag
-    nzn = -(hf - hc) / max(1.0, step_z) * exag
-    nyn = 1.0
-    nm = math.sqrt(nxn * nxn + nzn * nzn + nyn * nyn)
-    if nm > 1e-9:
-        nxn /= nm
-        nzn /= nm
-        nyn /= nm
+    if normal_override is not None:
+        nxn, nyn, nzn = normal_override
+    else:
+        nxn, nyn, nzn = _terrain_normal_at(grid_h, i, j, nx, nz, step_x, step_z)
     dot = nxn * lx + nzn * lz + nyn * ly
     shade = max(0.10, min(1.60, dot * 1.50 + 0.20))
     slope = math.sqrt(nxn * nxn + nzn * nzn)
@@ -200,6 +194,12 @@ def _vertex_color(
         bb = 48.0 + 42.0 * ht
         lit2 = lit
     tex = 0.92 + 0.16 * math.sin(wx * 0.0085) * math.cos(wz * 0.012)
+    if st != "lake":
+        tex *= 1.0 + 0.055 * (
+            math.sin(wx * 0.031 + wz * 0.011)
+            + math.sin(wz * 0.028 - wx * 0.009)
+            + 0.5 * math.sin((wx + wz) * 0.045)
+        )
     sf = lit2 * fog_vis * tex
     r = max(0.0, min(1.0, (br * sf + haze[0] * fog_haze) / 255.0))
     g = max(0.0, min(1.0, (bg * sf + haze[1] * fog_haze) / 255.0))
@@ -216,12 +216,18 @@ def _terrain_normal_at(
     step_x: float,
     step_z: float,
 ) -> tuple[float, float, float]:
-    hc = grid_h[i][j]
-    hr = grid_h[min(i + 1, nx - 1)][j]
-    hf = grid_h[i][min(j + 1, nz - 1)]
+    """Terrain normal from central height differences (smoother than one-sided)."""
+    im = max(0, i - 1)
+    ip = min(nx - 1, i + 1)
+    jm = max(0, j - 1)
+    jp = min(nz - 1, j + 1)
+    denom_x = max(1e-9, float(ip - im) * step_x)
+    denom_z = max(1e-9, float(jp - jm) * step_z)
+    dhx = (grid_h[ip][j] - grid_h[im][j]) / denom_x
+    dhz = (grid_h[i][jp] - grid_h[i][jm]) / denom_z
     exag = 4.5
-    nxn = -(hr - hc) / max(1.0, step_x) * exag
-    nzn = -(hf - hc) / max(1.0, step_z) * exag
+    nxn = -dhx * exag
+    nzn = -dhz * exag
     nyn = 1.0
     nm = math.sqrt(nxn * nxn + nzn * nzn + nyn * nyn)
     if nm > 1e-9:
@@ -229,6 +235,45 @@ def _terrain_normal_at(
         nzn /= nm
         nyn /= nm
     return nxn, nyn, nzn
+
+
+def _terrain_smoothed_normal_grid(
+    grid_h: list[list[float]],
+    nx: int,
+    nz: int,
+    step_x: float,
+    step_z: float,
+) -> list[list[tuple[float, float, float]]]:
+    """
+    Per-vertex averaged normals (3×3 box filter on analytic normals).
+    Reduces visible quad edges / jagged horizon under smooth shading.
+    """
+    raw: list[list[tuple[float, float, float]]] = []
+    for i in range(nx):
+        row: list[tuple[float, float, float]] = []
+        for j in range(nz):
+            row.append(_terrain_normal_at(grid_h, i, j, nx, nz, step_x, step_z))
+        raw.append(row)
+    out: list[list[tuple[float, float, float]]] = []
+    for i in range(nx):
+        row: list[tuple[float, float, float]] = []
+        for j in range(nz):
+            sx = sy = sz = 0.0
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    ii = i + di
+                    jj = j + dj
+                    if 0 <= ii < nx and 0 <= jj < nz:
+                        nxn, nyn, nzn = raw[ii][jj]
+                        sx += nxn
+                        sy += nyn
+                        sz += nzn
+            nm = math.sqrt(sx * sx + sy * sy + sz * sz)
+            if nm > 1e-9:
+                sx, sy, sz = sx / nm, sy / nm, sz / nm
+            row.append((sx, sy, sz))
+        out.append(row)
+    return out
 
 
 def _glu_lookat_up_hint(fx: float, fy: float, fz: float) -> tuple[float, float, float]:
@@ -281,6 +326,7 @@ def draw_background_terrain(
         GL_LINEAR_ATTENUATION,
         GL_MODELVIEW,
         GL_MODELVIEW_MATRIX,
+        GL_POLYGON_OFFSET_FILL,
         GL_POSITION,
         GL_PROJECTION,
         GL_PROJECTION_MATRIX,
@@ -309,6 +355,7 @@ def draw_background_terrain(
         glMaterialfv,
         glMatrixMode,
         glNormal3f,
+        glPolygonOffset,
         glShadeModel,
         glVertex3f,
         glViewport,
@@ -343,6 +390,8 @@ def draw_background_terrain(
     probe_z = float(model.pos_z_m)
     h_terr = float(model.world.height_m_at(probe_x, probe_z))
     py = h_terr + float(model.altitude_m)
+    # Denser terrain mesh and clearer fog when close to the surface or 3D view is strong.
+    landing_approach = alt < 4200.0 or float(terrain_alpha) > 0.38
 
     # Orbit camera
     yaw = float(renderer.orbit_yaw)
@@ -370,7 +419,7 @@ def draw_background_terrain(
     glDepthMask(True)
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
-    gluPerspective(68.0, float(w) / max(1, h), near_plane, far_plane)
+    gluPerspective(64.0 if landing_approach else 68.0, float(w) / max(1, h), near_plane, far_plane)
     glMatrixMode(GL_MODELVIEW)
     glLoadIdentity()
     # View direction (GLU-style: forward = normalize(center − eye)).
@@ -432,12 +481,17 @@ def draw_background_terrain(
     glEnable(GL_FOG)
     glFogfv(GL_FOG_COLOR, [0.14, 0.11, 0.13, 1.0])
     glFogi(GL_FOG_MODE, GL_LINEAR)
-    glFogf(GL_FOG_START, far_plane * 0.22)
-    glFogf(GL_FOG_END, far_plane * 0.94)
+    if landing_approach:
+        glFogf(GL_FOG_START, far_plane * 0.14)
+        glFogf(GL_FOG_END, far_plane * 0.88)
+    else:
+        glFogf(GL_FOG_START, far_plane * 0.22)
+        glFogf(GL_FOG_END, far_plane * 0.94)
 
     fade = float(np.clip(0.25 + 0.75 * terrain_alpha, 0.0, 1.0))
 
-    nx, nz = 36, 26
+    # Extra nz vs nx: more slices along depth → smoother horizon silhouette.
+    nx, nz = (92, 72) if landing_approach else (38, 28)
     sc = float(renderer.camera.scale_px_per_m)
     gs = renderer._gl_terrain_scale_smooth
     if gs is None:
@@ -449,8 +503,13 @@ def draw_background_terrain(
     world_w_m = w / max(1e-9, gs)
     raw_sx = world_w_m * 1.12 / max(1, nx - 1)
     raw_sz = world_w_m * 0.72 / max(1, nz - 1)
-    step_x = max(12.0, round(raw_sx / 10.0) * 10.0)
-    step_z = max(12.0, round(raw_sz / 10.0) * 10.0)
+    if landing_approach:
+        step_min = 5.0
+        step_x = max(step_min, round(raw_sx / step_min) * step_min)
+        step_z = max(step_min, round(raw_sz / step_min) * step_min)
+    else:
+        step_x = max(12.0, round(raw_sx / 10.0) * 10.0)
+        step_z = max(12.0, round(raw_sz / 10.0) * 10.0)
     # No floor() grid snap — otherwise terrain pops when moving or step size changes.
     gx0 = probe_x - 0.5 * float(nx - 1) * step_x
     gz0 = probe_z - 0.18 * float(nz - 1) * step_z
@@ -475,41 +534,103 @@ def draw_background_terrain(
     _lm = math.sqrt(_lx0 * _lx0 + _lz0 * _lz0 + _ly0 * _ly0)
     _lx, _lz, _ly = _lx0 / _lm, _lz0 / _lm, _ly0 / _lm
 
+    norm_sm = _terrain_smoothed_normal_grid(grid_h, nx, nz, step_x, step_z)
+
+    rgb_grid: list[list[tuple[float, float, float]]] = []
+    for i in range(nx):
+        row: list[tuple[float, float, float]] = []
+        for j in range(nz):
+            nxn, nyn, nzn = norm_sm[i][j]
+            row.append(
+                _vertex_color(
+                    grid_h,
+                    grid_st,
+                    i,
+                    j,
+                    nx,
+                    nz,
+                    gx0,
+                    gz0,
+                    step_x,
+                    step_z,
+                    hmin,
+                    hrange,
+                    _lx,
+                    _lz,
+                    _ly,
+                    t_anim,
+                    for_gl_lighting=True,
+                    normal_override=(nxn, nyn, nzn),
+                )
+            )
+        rgb_grid.append(row)
+
+    glEnable(GL_POLYGON_OFFSET_FILL)
+    glPolygonOffset(1.0, 2.0)
     glBegin(GL_TRIANGLES)
+
+    def _emit_corner(ii: int, jj: int) -> None:
+        nxn, nyn, nzn = norm_sm[ii][jj]
+        glNormal3f(nxn, nyn, -nzn)
+        r, g, b = rgb_grid[ii][jj]
+        glColor3f(r * fade, g * fade, b * fade)
+        glVertex3f(gx0 + ii * step_x, grid_h[ii][jj], -(gz0 + jj * step_z))
+
     for iz in range(nz - 1):
         for ix in range(nx - 1):
-            for tri in (
-                ((ix, iz), (ix + 1, iz), (ix + 1, iz + 1)),
-                ((ix, iz), (ix + 1, iz + 1), (ix, iz + 1)),
-            ):
-                for (i, j) in tri:
-                    wx = gx0 + i * step_x
-                    wz = gz0 + j * step_z
-                    yy = grid_h[i][j]
-                    nxn, nyn, nzn = _terrain_normal_at(grid_h, i, j, nx, nz, step_x, step_z)
-                    glNormal3f(nxn, nyn, -nzn)
-                    r, g, b = _vertex_color(
-                        grid_h,
-                        grid_st,
-                        i,
-                        j,
-                        nx,
-                        nz,
-                        gx0,
-                        gz0,
-                        step_x,
-                        step_z,
-                        hmin,
-                        hrange,
-                        _lx,
-                        _lz,
-                        _ly,
-                        t_anim,
-                        for_gl_lighting=True,
-                    )
-                    glColor3f(r * fade, g * fade, b * fade)
-                    glVertex3f(wx, yy, -wz)
+            if landing_approach:
+                xc = gx0 + (ix + 0.5) * step_x
+                zc = gz0 + (iz + 0.5) * step_z
+                hc = float(model.world.height_m_at(xc, zc))
+                sx = sy = sz = 0.0
+                for di in (0, 1):
+                    for dj in (0, 1):
+                        nxn, nyn, nzn = norm_sm[ix + di][iz + dj]
+                        sx += nxn
+                        sy += nyn
+                        sz += nzn
+                nm = math.sqrt(sx * sx + sy * sy + sz * sz)
+                if nm > 1e-9:
+                    ncx, ncy, ncz = sx / nm, sy / nm, sz / nm
+                else:
+                    ncx, ncy, ncz = 0.0, 1.0, 0.0
+                rc = gc = bc = 0.0
+                for di in (0, 1):
+                    for dj in (0, 1):
+                        r, g, b = rgb_grid[ix + di][iz + dj]
+                        rc += r
+                        gc += g
+                        bc += b
+                rc *= 0.25
+                gc *= 0.25
+                bc *= 0.25
+
+                def _emit_center() -> None:
+                    glNormal3f(ncx, ncy, -ncz)
+                    glColor3f(rc * fade, gc * fade, bc * fade)
+                    glVertex3f(xc, hc, -zc)
+
+                _emit_corner(ix, iz)
+                _emit_corner(ix + 1, iz)
+                _emit_center()
+                _emit_corner(ix + 1, iz)
+                _emit_corner(ix + 1, iz + 1)
+                _emit_center()
+                _emit_corner(ix + 1, iz + 1)
+                _emit_corner(ix, iz + 1)
+                _emit_center()
+                _emit_corner(ix, iz + 1)
+                _emit_corner(ix, iz)
+                _emit_center()
+            else:
+                for tri in (
+                    ((ix, iz), (ix + 1, iz), (ix + 1, iz + 1)),
+                    ((ix, iz), (ix + 1, iz + 1), (ix, iz + 1)),
+                ):
+                    for (i, j) in tri:
+                        _emit_corner(i, j)
     glEnd()
+    glDisable(GL_POLYGON_OFFSET_FILL)
 
     glDisable(GL_FOG)
     glDisable(GL_LIGHTING)
