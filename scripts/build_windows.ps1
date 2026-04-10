@@ -22,9 +22,13 @@ if (-not (Test-Path $venvPy)) {
     }
 }
 
-$pip = Join-Path $root '.venv\Scripts\pip.exe'
-& $pip install --upgrade pip
-& $pip install -r (Join-Path $root 'requirements.txt') -r (Join-Path $root 'scripts\requirements-build.txt')
+# Активируем venv для корректной работы pip
+$activatePs1 = Join-Path $root '.venv\Scripts\Activate.ps1'
+& $activatePs1
+
+# Теперь pip работает без проблем
+pip install --upgrade pip
+pip install -r requirements.txt -r scripts\requirements-build.txt
 
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $root 'build'), (Join-Path $root 'dist')
 & $venvPy -m PyInstaller --noconfirm --clean (Join-Path $root 'TitanLandingSimulator.spec')
@@ -38,3 +42,5 @@ New-Item -ItemType Directory -Force -Path $destDir | Out-Null
 $dest = Join-Path $destDir 'TitanLandingSimulator.exe'
 Copy-Item -Force $exe $dest
 Write-Host "OK: $dest"
+
+deactivate  # Деактивируем venv
